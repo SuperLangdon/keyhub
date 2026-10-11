@@ -1,0 +1,215 @@
+[
+ {
+  "slug": "hi75",
+  "dir": "2",
+  "name": "Hi75 Keyboard",
+  "short": "Hi75",
+  "sub": "75% 客制化套件",
+  "keys": 81,
+  "psd": [
+   3,
+   0,
+   0,
+   0,
+   0,
+   162
+  ],
+  "wired": {
+   "vid": 9610,
+   "pid": 268
+  },
+  "wireless": {
+   "vid": 13652,
+   "pid": 64009
+  }
+ },
+ {
+  "slug": "a75",
+  "dir": "A75",
+  "name": "A75 Keyboard",
+  "short": "A75",
+  "sub": "Alice 布局 · 三模 · 旋钮",
+  "keys": 88,
+  "psd": [
+   3,
+   0,
+   0,
+   0,
+   0,
+   101
+  ],
+  "wired": {
+   "vid": 9610,
+   "pid": 268
+  },
+  "wireless": {
+   "vid": 13652,
+   "pid": 64009
+  }
+ },
+ {
+  "slug": "hi75c-pro",
+  "dir": "Hi75C Pro",
+  "name": "Hi75C Pro Keyboard",
+  "short": "Hi75C Pro",
+  "sub": "75% Pro",
+  "keys": 81,
+  "psd": [
+   3,
+   0,
+   0,
+   0,
+   0,
+   163
+  ],
+  "wired": {
+   "vid": 9610,
+   "pid": 268
+  },
+  "wireless": {
+   "vid": 13652,
+   "pid": 64009
+  }
+ },
+ {
+  "slug": "hi8",
+  "dir": "Hi8",
+  "name": "Hi8 Keyboard",
+  "short": "Hi8 3-Mode",
+  "sub": "全铝 · 三模",
+  "keys": 80,
+  "psd": [
+   3,
+   0,
+   0,
+   0,
+   0,
+   202
+  ],
+  "wired": {
+   "vid": 9610,
+   "pid": 268
+  },
+  "wireless": {
+   "vid": 13652,
+   "pid": 64009
+  }
+ },
+ {
+  "slug": "hi86",
+  "dir": "Hi86",
+  "name": "Hi86 Keyboard",
+  "short": "Hi86",
+  "sub": "86 键",
+  "keys": 86,
+  "psd": [
+   3,
+   0,
+   0,
+   0,
+   1,
+   141
+  ],
+  "wired": {
+   "vid": 9610,
+   "pid": 268
+  },
+  "wireless": {
+   "vid": 13652,
+   "pid": 64009
+  }
+ },
+ {
+  "slug": "hi8se",
+  "dir": "Hi8SE",
+  "name": "Hi8SE Keyboard",
+  "short": "Hi8SE",
+  "sub": "全铝 SE",
+  "keys": 80,
+  "psd": [
+   3,
+   0,
+   0,
+   0,
+   1,
+   63
+  ],
+  "wired": {
+   "vid": 9610,
+   "pid": 268
+  },
+  "wireless": {
+   "vid": 13652,
+   "pid": 64009
+  }
+ },
+ {
+  "slug": "hi98",
+  "dir": "Hi98",
+  "name": "Hi98 Keyboard",
+  "short": "Hi98",
+  "sub": "98 键 · 有线",
+  "keys": 101,
+  "psd": [
+   3,
+   0,
+   0,
+   0,
+   1,
+   34
+  ],
+  "wired": {
+   "vid": 9610,
+   "pid": 268
+  },
+  "wireless": null
+ },
+ {
+  "slug": "hi98-3mode",
+  "dir": "Hi98 3-Mode",
+  "name": "Hi98 Keyboard",
+  "short": "Hi98 3-Mode",
+  "sub": "98 键 · 三模",
+  "keys": 101,
+  "psd": [
+   3,
+   0,
+   0,
+   0,
+   1,
+   33
+  ],
+  "wired": {
+   "vid": 9610,
+   "pid": 268
+  },
+  "wireless": {
+   "vid": 13652,
+   "pid": 64009
+  }
+ },
+ {
+  "slug": "hi75-rgb",
+  "dir": "RGB",
+  "name": "Hi75 RGB Keyboard",
+  "short": "Hi75 RGB",
+  "sub": "75% RGB · 旋钮",
+  "keys": 81,
+  "psd": [
+   3,
+   0,
+   0,
+   0,
+   0,
+   155
+  ],
+  "wired": {
+   "vid": 9610,
+   "pid": 268
+  },
+  "wireless": {
+   "vid": 13652,
+   "pid": 64009
+  }
+ }
+]

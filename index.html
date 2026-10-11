@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KeyHub · LEOBOG ONE 网页驱动</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="icon" href="favicon.ico" sizes="16x24x32x48">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#f7f7f4">
+<meta name="description" content="KeyHub — LEOBOG ONE 系列键盘的开源网页驱动（非官方），支持 WebHID 真机连接与灯效模拟。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/app.css">
+<script>
+// 先于渲染恢复夜间主题，避免暗色用户看到闪白
+try {
+  if (JSON.parse(localStorage.getItem('leobog-web-v1') || '{}').theme === 'dark')
+    document.documentElement.dataset.theme = 'dark';
+} catch (e) {}
+</script>
+</head>
+<body>
+
+<!-- 免责声明门：开源说明 + 风险确认，确认后才能进入型号选择。
+     结构与各功能弹窗统一（modal-mask 毛玻璃遮罩 + modal 卡片），确认前不提供关闭途径 -->
+<div id="gate" class="modal-mask">
+  <div class="gate-top">
+    <button id="gate-demo" class="icon-btn" type="button" title="演示模式" aria-haspopup="dialog"></button>
+    <div class="lang-wrap">
+      <button id="gate-lang" class="icon-btn" type="button" title="Language / 语言" aria-haspopup="menu"></button>
+      <div class="lang-menu" role="menu">
+        <button type="button" class="lang-item" data-lang="zh">简体中文 <span class="ck" data-icon="check"></span></button>
+        <button type="button" class="lang-item" data-lang="en">English <span class="ck" data-icon="check"></span></button>
+      </div>
+    </div>
+    <button id="gate-theme" class="icon-btn" type="button" title="日/夜间模式"></button>
+  </div>
+  <div class="modal gate-card">
+    <h1 class="brand-lockup">
+      <img src="assets/brand/logo-wide.svg" alt="KeyHub" class="brand-wide only-light">
+      <img src="assets/brand/logo-wide-dark.svg" alt="" aria-hidden="true" class="brand-wide only-dark">
+    </h1>
+    <p class="gate-badge" id="gate-badge">非官方 · 开源驱动实现</p>
+    <div class="gate-body">
+      <p id="gate-desc">本站是 LEOBOG ONE 官方桌面驱动的<b>开源网页复刻</b>，与 LEOBOG 官方无关。设备通信协议来自同芯片键盘
+        （AULA F75 / F87 Pro，SINO WEALTH 方案）的<a href="https://github.com/marcoslor/Aula-F87-Controller"
+        target="_blank" rel="noreferrer">开源逆向项目</a>；型号数据、语言包与灯效帧解析自官方驱动安装包。</p>
+      <p class="gate-warn"><span data-icon="triangleAlert"></span>
+        <span id="gate-warn-text">协议<b>未经原厂键盘实测</b>，向真机写入配置可能出现预期之外的行为（灯光异常、配置错乱等）。
+        使用本工具对设备造成的任何影响，<b>后果由使用者自行承担</b>。</span></p>
+    </div>
+    <label class="gate-agree">
+      <input type="checkbox" id="gate-agree">
+      <span id="gate-agree-text">我已了解这是非官方开源实现，自愿承担全部使用风险</span>
+    </label>
+    <button id="gate-enter" class="btn primary" disabled>确认并进入</button>
+  </div>
+</div>
+
+<!-- 主页：连接中心（键盘动画 + 添加新设备向导）。常驻渲染在底层，门禁页以磨砂玻璃浮于其上 -->
+<div id="welcome" class="welcome">
+  <div class="welcome-top">
+    <button id="welcome-demo" class="icon-btn" type="button" title="演示模式" aria-haspopup="dialog"></button>
+    <div class="lang-wrap">
+      <button id="welcome-lang" class="icon-btn" type="button" title="Language / 语言" aria-haspopup="menu"></button>
+      <div id="lang-menu" class="lang-menu" role="menu">
+        <button type="button" class="lang-item" data-lang="zh">简体中文 <span class="ck" data-icon="check"></span></button>
+        <button type="button" class="lang-item" data-lang="en">English <span class="ck" data-icon="check"></span></button>
+      </div>
+    </div>
+    <button id="welcome-theme" class="icon-btn" type="button" title="日/夜间模式"></button>
+  </div>
+  <div class="welcome-inner">
+    <div class="welcome-head">
+      <h1 class="brand-lockup">
+        <img src="assets/brand/logo-wide.svg" alt="KeyHub" class="brand-wide only-light">
+        <img src="assets/brand/logo-wide-dark.svg" alt="" aria-hidden="true" class="brand-wide only-dark">
+      </h1>
+    </div>
+    <div id="conn-hero" class="conn-hero"></div>
+  </div>
+</div>
+
+<!-- 主界面 -->
+<div id="app" class="app hidden">
+  <aside class="sidebar">
+    <svg class="logo" viewBox="0 0 128 128" role="img" aria-label="KeyHub" title="返回型号选择"><rect x="0" y="0" width="128" height="128" rx="28" fill="var(--mark-tile,#26251e)"/><path d="M 10.5 -21.5 L 10.5 89.5 M 10.5 36 L 89.5 -21.5 M 10.5 36 L 89.5 89.5" transform="translate(24.73 32.26) scale(0.227)" fill="none" stroke="var(--mark-key,#f7f7f4)" stroke-width="21" stroke-linecap="round" stroke-linejoin="round"/><path d="M 21 50 L 79 50 M 84.88 68.54 A 39.5 39.5 0 1 1 89.5 50" transform="translate(52.88 32.26) scale(0.227)" fill="none" stroke="var(--mark-key,#f7f7f4)" stroke-width="21" stroke-linecap="round" stroke-linejoin="round"/><path d="M 10.5 10.5 L 50 89.5 M 89.5 10.5 L 33.5 122.5" transform="translate(80.57 32.26) scale(0.227)" fill="none" stroke="var(--mark-key,#f7f7f4)" stroke-width="21" stroke-linecap="round" stroke-linejoin="round"/><rect x="19.72" y="67.96" width="88.56" height="44" rx="11" fill="var(--primary,#f54e00)"/><path d="M 10.5 -21.5 L 10.5 89.5 M 89.5 -21.5 L 89.5 89.5 M 10.5 34 L 89.5 34" transform="translate(29.72 83.27) scale(0.197)" fill="none" stroke="#1c1b18" stroke-width="21" stroke-linecap="round" stroke-linejoin="round"/><path d="M 10.5 10.5 L 10.5 50 M 89.5 50 A 39.5 39.5 0 0 1 10.5 50 M 89.5 50 L 89.5 10.5" transform="translate(54.15 83.27) scale(0.197)" fill="none" stroke="#1c1b18" stroke-width="21" stroke-linecap="round" stroke-linejoin="round"/><path d="M 10.5 -21.5 L 10.5 89.5 M 50 10.5 A 39.5 39.5 0 0 1 50 89.5 A 39.5 39.5 0 0 1 50 10.5" transform="translate(78.58 83.27) scale(0.197)" fill="none" stroke="#1c1b18" stroke-width="21" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <nav id="nav" class="nav"></nav>
+    <div class="sidebar-foot">
+      <button id="btn-debug" class="dbg-btn" title="HID 控制台">HID</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div class="topbar-model">
+        <span id="tb-model-name">—</span>
+        <span id="tb-mode" class="tb-mode hidden"></span>
+        <span id="tb-model-sub" class="dim"></span>
+      </div>
+      <div class="topbar-right">
+        <div class="lang-wrap">
+          <button id="app-lang" class="icon-btn" type="button" title="Language / 语言" aria-haspopup="menu"></button>
+          <div class="lang-menu" role="menu">
+            <button type="button" class="lang-item" data-lang="zh">简体中文 <span class="ck" data-icon="check"></span></button>
+            <button type="button" class="lang-item" data-lang="en">English <span class="ck" data-icon="check"></span></button>
+          </div>
+        </div>
+        <button id="btn-theme" class="icon-btn" title="切换日/夜间模式"></button>
+        <button id="btn-back" class="icon-btn" title="返回型号选择"></button>
+      </div>
+    </header>
+
+    <section class="kb-stage">
+      <div class="kb-card"><div id="kb-view"></div></div>
+    </section>
+
+    <section id="page" class="page"></section>
+  </main>
+</div>
+
+<!-- HID 控制台（专业用户调试台：监视/过滤 + 报文构造发送 + 只读探针） -->
+<div id="debug-drawer" class="debug-drawer hidden">
+  <div class="dbg-head">
+    <b>HID 控制台</b>
+    <span id="dbg-status" class="dbg-status"></span>
+    <span class="dbg-flex"></span>
+    <button id="dbg-float" class="ghost-btn" title="悬浮为可拖动小窗"><span data-icon="pip"></span></button>
+    <button id="dbg-copy" class="ghost-btn" title="复制可见日志"><span data-icon="copy"></span></button>
+    <button id="dbg-dl" class="ghost-btn" title="导出完整日志（.log）"><span data-icon="download"></span></button>
+    <button id="dbg-clear" class="ghost-btn" title="清空日志"><span data-icon="eraser"></span></button>
+    <button id="dbg-close" class="ghost-btn"><span data-icon="x"></span></button>
+  </div>
+  <div class="dbg-toolbar">
+    <div id="dbg-kinds" class="dbg-kinds"></div>
+    <input id="dbg-search" class="inp dbg-search" type="search" placeholder="筛选…">
+    <label class="dbg-follow"><input type="checkbox" id="dbg-follow" checked>跟随</label>
+    <span id="dbg-count" class="dbg-count"></span>
+  </div>
+  <pre id="dbg-log" class="dbg-log"></pre>
+  <div class="dbg-compose">
+    <div class="dbg-row">
+      <select id="dbg-mode" class="inp dbg-sel" title="发送模式"></select>
+      <select id="dbg-target" class="inp dbg-sel" title="发送目标接口"></select>
+      <input id="dbg-input" class="inp dbg-inp" type="text" spellcheck="false" autocomplete="off">
+      <button id="dbg-send" class="btn">发送</button>
+    </div>
+    <div class="dbg-row">
+      <span id="dbg-preview" class="dbg-preview"></span>
+      <label class="dbg-follow" id="dbg-readback-wrap"><input type="checkbox" id="dbg-readback" checked>读回应答</label>
+    </div>
+    <div class="dbg-row">
+      <span class="dim dbg-quick-label">只读探针</span>
+      <span id="dbg-probes" class="dbg-probes"></span>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>

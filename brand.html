@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KeyHub · 品牌规范</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="icon" href="favicon.ico" sizes="16x32x48">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/app.css">
+<style>
+/* 品牌规范页 —— 复用 app.css 令牌, 仅本页布局样式 */
+body { overflow: auto; }
+.wrap { max-width: 960px; margin: 0 auto; padding: 64px 24px 96px; }
+.sec { margin-top: 80px; }
+.sec > h2 {
+  font: 400 26px/1.25 var(--font-sans); letter-spacing: -0.33px; color: var(--ink);
+  margin-bottom: 8px;
+}
+.sec > .sub { color: var(--muted); font-size: 14px; margin-bottom: 24px; }
+.grid { display: grid; gap: 16px; }
+.grid.c3 { grid-template-columns: repeat(3, 1fr); }
+.grid.c2 { grid-template-columns: repeat(2, 1fr); }
+@media (max-width: 720px) { .grid.c3, .grid.c2 { grid-template-columns: 1fr; } }
+.tile {
+  background: var(--card); border: 1px solid var(--hairline); border-radius: var(--r-lg);
+  padding: 24px; display: flex; flex-direction: column; align-items: center; gap: 14px;
+}
+.tile.dark { background: var(--ink); color: var(--canvas); border-color: var(--ink); }
+.tile .label { font: 500 12px/1.4 var(--font-sans); color: var(--muted); }
+.tile.dark .label { color: #8b887d; }
+.row { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; }
+table.tok { border-collapse: collapse; width: 100%; background: var(--card); border: 1px solid var(--hairline); border-radius: var(--r-lg); overflow: hidden; }
+table.tok th, table.tok td { text-align: left; padding: 10px 16px; border-bottom: 1px solid var(--hairline-soft); font: 400 13px/1.5 var(--font-sans); color: var(--body); }
+table.tok th { font-weight: 600; color: var(--ink); }
+table.tok tr:last-child td { border-bottom: none; }
+.sw { display: inline-block; width: 14px; height: 14px; border-radius: 4px; border: 1px solid var(--hairline-strong); vertical-align: -2px; margin-right: 8px; }
+code, .mono { font-family: var(--font-mono); font-size: 12.5px; }
+.codeblock {
+  background: var(--card); border: 1px solid var(--hairline); border-radius: var(--r-lg);
+  padding: 16px 20px; font-family: var(--font-mono); font-size: 13px; color: var(--ink);
+  overflow-x: auto; user-select: text; white-space: pre;
+}
+ul.rules { list-style: none; display: grid; gap: 10px; }
+ul.rules li { background: var(--card); border: 1px solid var(--hairline); border-radius: var(--r-md); padding: 12px 16px; font-size: 13.5px; color: var(--body); }
+ul.rules li b { color: var(--ink); font-weight: 600; }
+ul.rules li.no b { color: var(--error); }
+.favdemo { display: flex; align-items: flex-end; gap: 28px; background: var(--card); border: 1px solid var(--hairline); border-radius: var(--r-lg); padding: 24px; }
+.favdemo .item { text-align: center; }
+.favdemo .item img { display: block; margin: 0 auto 8px; image-rendering: auto; }
+.favdemo .item span { font: 500 11px/1 var(--font-mono); color: var(--muted); }
+.hero { text-align: center; }
+.hero img { width: min(560px, 100%); height: auto; }
+.kicker { font: 600 11px/1.4 var(--font-sans); letter-spacing: 0.88px; text-transform: uppercase; color: var(--muted); }
+.sidebar-demo {
+  display: flex; align-items: flex-start; gap: 18px; background: var(--card);
+  border: 1px solid var(--hairline); border-radius: var(--r-lg); padding: 20px;
+}
+.sidebar-demo .rail {
+  width: 64px; flex: none; display: flex; flex-direction: column; align-items: center; gap: 14px;
+  padding: 10px 0; border-right: 1px solid var(--hairline-soft);
+}
+.sidebar-demo .rail .ph { width: 34px; height: 34px; border-radius: 8px; background: var(--surface-strong); }
+.sidebar-demo .rail svg.logo { width: 38px; height: 38px; display: block; }
+.sidebar-demo p { font-size: 13px; color: var(--body); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="hero sec" style="margin-top:0">
+    <img src="assets/brand/logo-wide.svg" alt="KeyHub">
+    <h1 style="font:400 36px/1.2 var(--font-sans); letter-spacing:-0.72px; color:var(--ink); margin-top:24px">KeyHub 品牌规范</h1>
+    <p style="color:var(--muted); font-size:14px; margin-top:8px">LEOBOG ONE 键盘网页驱动 · 非官方开源复刻</p>
+  </div>
+
+  <div class="sec">
+    <h2>概念 · 键帽 Hub</h2>
+    <p class="sub">KeyHub 是键盘驱动，最诚实的符号就是一颗键帽 —— 名字本身就是标志。</p>
+    <ul class="rules">
+      <li><b>横标（大空间）</b>：墨色 <b>Key</b> + 藏在橙色键帽里的墨色 <b>Hub</b>。键帽是唯一的图形隐喻 —— 我们驱动的对象就是一颗颗键帽，不要另造。</li>
+      <li><b>方标（小空间）</b>：墨色圆角方 tile，上行 Key、下行橙色键帽 Hub，即 app icon。自带底色，浅底深底通用。</li>
+      <li><b>小尺寸（favicon ≤32px）</b>：简化为「橙色键帽 + 粗体 H」剪影，保证标签页可辨认。</li>
+      <li>名字 = <b>Key</b> + <b>Hub</b>。永远写 <span class="mono">KeyHub</span>，不写 Keyhub / keyhub / KEYHUB（全大写仅限图形化场景）。</li>
+      <li>字母是手工构建的等线几何体（圆头笔画，K/e/y/H/u/b），不依赖任何字体文件；正文与界面仍用 Inter / JetBrains Mono。</li>
+    </ul>
+  </div>
+
+  <div class="sec">
+    <h2>标志</h2>
+    <p class="sub">方标自带墨色 tile，任何底色直接使用；侧栏等应用内嵌位置用内联版（tile 与 Key 字色走 CSS 变量，随日/夜主题自动切换）。</p>
+    <div class="grid c3">
+      <div class="tile"><img src="assets/brand/mark.svg" width="132" alt="方标"><span class="label">mark.svg · 方标（任意底色）</span></div>
+      <div class="tile dark" style="background:#1c1b18"><img src="assets/brand/mark.svg" width="132" alt="方标深底"><span class="label">mark.svg · 深底同样成立</span></div>
+      <div class="tile"><img src="assets/brand/favicon.svg" width="132" alt="小尺寸简化"><span class="label">favicon.svg · 小尺寸简化（橙键帽 + H）</span></div>
+    </div>
+    <div class="sidebar-demo" style="margin-top:16px">
+      <div class="rail">
+        <svg class="logo" viewBox="0 0 128 128" role="img" aria-label="KeyHub"><rect x="0" y="0" width="128" height="128" rx="28" fill="var(--mark-tile,#26251e)"/><path d="M 10.5 -21.5 L 10.5 89.5 M 10.5 36 L 89.5 -21.5 M 10.5 36 L 89.5 89.5" transform="translate(24.73 32.26) scale(0.227)" fill="none" stroke="var(--mark-key,#f7f7f4)" stroke-width="21" stroke-linecap="round" stroke-linejoin="round"/><path d="M 21 50 L 79 50 M 84.88 68.54 A 39.5 39.5 0 1 1 89.5 50" transform="translate(52.88 32.26) scale(0.227)" fill="none" stroke="var(--mark-key,#f7f7f4)" stroke-width="21" stroke-linecap="round" stroke-linejoin="round"/><path d="M 10.5 10.5 L 50 89.5 M 89.5 10.5 L 33.5 122.5" transform="translate(80.57 32.26) scale(0.227)" fill="none" stroke="var(--mark-key,#f7f7f4)" stroke-width="21" stroke-linecap="round" stroke-linejoin="round"/><rect x="19.72" y="67.96" width="88.56" height="44" rx="11" fill="var(--primary,#f54e00)"/><path d="M 10.5 -21.5 L 10.5 89.5 M 89.5 -21.5 L 89.5 89.5 M 10.5 34 L 89.5 34" transform="translate(29.72 83.27) scale(0.197)" fill="none" stroke="#1c1b18" stroke-width="21" stroke-linecap="round" stroke-linejoin="round"/><path d="M 10.5 10.5 L 10.5 50 M 89.5 50 A 39.5 39.5 0 0 1 10.5 50 M 89.5 50 L 89.5 10.5" transform="translate(54.15 83.27) scale(0.197)" fill="none" stroke="#1c1b18" stroke-width="21" stroke-linecap="round" stroke-linejoin="round"/><path d="M 10.5 -21.5 L 10.5 89.5 M 50 10.5 A 39.5 39.5 0 0 1 50 89.5 A 39.5 39.5 0 0 1 50 10.5" transform="translate(78.58 83.27) scale(0.197)" fill="none" stroke="#1c1b18" stroke-width="21" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span class="ph"></span><span class="ph"></span><span class="ph"></span>
+      </div>
+      <p><b>侧栏用法</b>（index.html）：内联 <span class="mono">mark-inline.svg</span> 的内容，tile 用 <span class="mono">var(--mark-tile)</span>、Key 用 <span class="mono">var(--mark-key)</span>、键帽用 <span class="mono">var(--primary)</span> —— 深色主题下 tile 自动提亮为 #3a3830，与画布拉开层次。推荐尺寸 38px（侧栏 64px 栅格内）。</p>
+    </div>
+  </div>
+
+  <div class="sec">
+    <h2>横标</h2>
+    <p class="sub">大空间（欢迎页门禁、README、og 图）用横标；<b>Hub</b> 藏在键帽里是唯一橙色元素，其余字母用墨色。深底换用 -dark 变体（Key 提亮、橙提亮）。</p>
+    <div class="grid c2">
+      <div class="tile"><img src="assets/brand/logo-wide.svg" style="width:min(340px,86%)" alt="横标"><span class="label">logo-wide.svg（浅底）</span></div>
+      <div class="tile dark"><img src="assets/brand/logo-wide-dark.svg" style="width:min(340px,86%)" alt="横标深底"><span class="label">logo-wide-dark.svg（深底）</span></div>
+    </div>
+    <p class="sub" style="margin-top:16px">页面里成对放置两版并用 CSS 按主题切换（<span class="mono">.only-light / .only-dark</span>），参见 index.html 的 <span class="mono">.brand-lockup</span>。</p>
+  </div>
+
+  <div class="sec">
+    <h2>Favicon 套件</h2>
+    <p class="sub">≤32px 自动简化：丢掉「Key」行与墨 tile，只留橙色键帽 + 粗体 H；48px 起恢复完整方标。</p>
+    <div class="favdemo">
+      <div class="item"><img src="favicon.svg" width="16" alt=""><span>16</span></div>
+      <div class="item"><img src="favicon.svg" width="24" alt=""><span>24</span></div>
+      <div class="item"><img src="favicon.svg" width="32" alt=""><span>32</span></div>
+      <div class="item"><img src="favicon.ico" width="48" alt=""><span>48</span></div>
+      <div class="item"><img src="assets/brand/icon-192.png" width="64" alt=""><span>64</span></div>
+      <div class="item"><img src="assets/brand/icon-192.png" width="128" alt=""><span>128</span></div>
+    </div>
+    <p class="sub" style="margin-top:16px">文件：<span class="mono">favicon.svg · favicon.ico(16/24/32/48/256) · apple-touch-icon.png(180) · assets/brand/icon-{192,512}.png · og.png(1200×630)</span></p>
+  </div>
+
+  <div class="sec">
+    <h2>色彩</h2>
+    <p class="sub">与 css/app.css 令牌完全一致；橙色永远是唯一强调色，只给品牌元素与主 CTA。</p>
+    <table class="tok">
+      <tr><th>用途</th><th>日间</th><th>夜间</th><th>令牌</th></tr>
+      <tr><td>键帽 / 强调（唯一橙色）</td><td><span class="sw" style="background:#f54e00"></span>#f54e00</td><td><span class="sw" style="background:#ff5c14"></span>#ff5c14</td><td class="mono">--primary</td></tr>
+      <tr><td>方标 tile（侧栏随主题提亮）</td><td><span class="sw" style="background:#26251e"></span>#26251e</td><td><span class="sw" style="background:#3a3830"></span>#3a3830</td><td class="mono">--mark-tile</td></tr>
+      <tr><td>Key 字（方标）</td><td><span class="sw" style="background:#f7f7f4"></span>#f7f7f4</td><td><span class="sw" style="background:#e9e7de"></span>#e9e7de</td><td class="mono">--mark-key</td></tr>
+      <tr><td>墨色（横标 Key / 深底反白）</td><td><span class="sw" style="background:#26251e"></span>#26251e</td><td><span class="sw" style="background:#e9e7de"></span>#e9e7de</td><td class="mono">--ink</td></tr>
+      <tr><td>键帽上的 Hub 字（恒定暖黑）</td><td><span class="sw" style="background:#1c1b18"></span>#1c1b18</td><td><span class="sw" style="background:#1c1b18"></span>#1c1b18</td><td class="mono">（常量）</td></tr>
+    </table>
+  </div>
+
+  <div class="sec">
+    <h2>用法</h2>
+    <ul class="rules">
+      <li><b>要</b>：小空间（侧栏、标签页、头像位）用方标，大空间（欢迎页、文档头、分享卡）用横标 —— 不要把横标塞进 40px 的格子。</li>
+      <li><b>要</b>：橙色保持稀缺 —— 每个构图里只有键帽是橙色的；深色底一律换用 -dark / 内联变体。</li>
+      <li><b>要</b>：应用内嵌 UI 用内联 SVG + CSS 变量（tile/字色随主题），不要贴死色的 &lt;img&gt;。</li>
+      <li class="no"><b>不要</b>：给标志加投影、渐变、描边光环 —— 深度只靠色块与墨色对比。</li>
+      <li class="no"><b>不要</b>：改变键帽圆角比例、拉伸变形、给键帽换颜色或把 Hub 拆出键帽。</li>
+      <li class="no"><b>不要</b>：引入第二个强调色或给非键帽元素上橙色。</li>
+    </ul>
+  </div>
+
+  <div class="sec">
+    <h2>资产与再生成</h2>
+    <p class="sub">所有品牌资产由零依赖脚本生成，不要手改 assets/brand/ 下的文件（侧栏内联 SVG 是 mark-inline.svg 的拷贝，重新生成后需同步粘贴）。</p>
+    <div class="codeblock">node tools/gen-brand.mjs            # 生成全部资产（assets/brand/ + favicon.* + apple-touch-icon）
+node tools/gen-brand.mjs --preview  # 仅输出目检大图 tools/preview-brand.png
+node tools/gen-brand.mjs --crops    # 字形 / 像素级检查图 tools/preview-crops.png</div>
+    <p class="sub" style="margin-top:16px">字形几何（K/e/y/H/u/b 笔画、字距、键帽内衬、方标竖排节奏等）都在 <span class="mono">tools/gen-brand.mjs</span> 顶部的 glyphsAt / PAIR_GAP / WIDE / MK / FAV 常量里调。</p>
+  </div>
+
+</div>
+</body>
+</html>

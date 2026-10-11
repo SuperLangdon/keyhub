@@ -1,0 +1,13 @@
+# 依赖（本项目零依赖，此条仅防误装）
+node_modules/
+
+# 可再生成的生成物（gen-brand.mjs --preview / --crops 的目检输出）
+tools/preview-*.png
+
+# 系统 / 编辑器杂项
+.DS_Store
+Thumbs.db
+*.log
+.vs/
+.idea/
+.zcode/
