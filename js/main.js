@@ -1,6 +1,6 @@
 // KeyHub — 启动与导航
 // 构建标记：改动 js 后递增，用于日志中核对浏览器是否拿到最新代码（避免模块缓存误导调试）
-export const BUILD = '2026-10-12.37（按键页：标签重排 + 组合键行溢出修复 + 单列布局）';
+export const BUILD = '2026-10-12.38（门禁：确认按钮勾选态初始同步，修复刷新后勾选不解锁）';
 import { loadLang, setLang, L } from './i18n.js';
 import { state, restore, save, loadCfgFor, on } from './store.js';
 import { KeyboardView } from './keyboard/render.js';
@@ -259,7 +259,12 @@ function wireLangMenus() {
 function wireGate() {
   const agree = document.getElementById('gate-agree');
   const enter = document.getElementById('gate-enter');
-  agree.addEventListener('change', () => { enter.disabled = !agree.checked; });
+  // 按钮解锁不能只依赖 change：浏览器刷新 / 会话恢复会还原复选框的勾选态但不触发 change，
+  // 会卡在「已勾选但按钮仍禁用」。初始同步 + pageshow（bfcache 恢复后也会再触发一次）兜底。
+  const syncEnter = () => { enter.disabled = !agree.checked; };
+  agree.addEventListener('change', syncEnter);
+  addEventListener('pageshow', syncEnter);
+  syncEnter();
   enter.addEventListener('click', () => {
     if (agree.checked) {
       state.gateAck = GATE_VER; // 整个生命周期只确认一次
