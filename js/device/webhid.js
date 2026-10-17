@@ -31,9 +31,7 @@ export const hasOutputReport = (dev, id) => reportIds(dev).output.includes(id);
 // vendor 功能可能分散在不同接口上），取消返回 null。
 export async function requestDevice(log, channel = 'any') {
   if (!hidAvailable()) throw new Error('WebHID 不可用：需要 Chrome/Edge 并通过 localhost 或 HTTPS 访问');
-  const targets = channel === 'wired' ? [P.WIRED]
-    : channel === 'wireless' ? [P.WIRELESS]
-    : [P.WIRED, P.WIRELESS];
+  const targets = P.idsForChannel(channel);
   const filters = [];
   for (let page = 0xff00; page <= 0xff04; page++) {
     for (const t of targets) filters.push({ vendorId: t.vid, productId: t.pid, usagePage: page });
@@ -110,7 +108,7 @@ export async function readConfig(dev, log, retries = 3) {
   try {
     for (let a = 0; a < retries; a++) {
       if (a > 0) { log && log('in', `重读配置 (${a + 1}/${retries})…`); await sleep(150); buf.length = 0; }
-      const req = P.buildFrame(P.CMD_READ, P.SUBCMD_CONFIRM, 0, new Uint8Array(15));
+      const req = P.buildFrame(P.CMD_READ, P.NFRAMES_CONFIRM, 0, new Uint8Array(15));
       await dev.sendReport(req[0], req.slice(1));
       log && log('tx', P.hex(req));
       const cfg = new Array(10).fill(null);
@@ -118,7 +116,7 @@ export async function readConfig(dev, log, retries = 3) {
       while (Date.now() < deadline) {
         while (buf.length) {
           const r = buf.shift();
-          if (r.length >= 20 && r[0] === P.REPORT_ID && r[1] === P.CMD_READ && r[2] === P.SUBCMD_CONFIG) {
+          if (r.length >= 20 && r[0] === P.REPORT_ID && r[1] === P.CMD_READ && r[2] === P.NFRAMES_CONFIG) {
             const seq = r[3];
             if (seq >= 0 && seq < 10) { cfg[seq] = r; log && log('rx', P.hex(r)); }
           }
@@ -135,29 +133,30 @@ export async function readConfig(dev, log, retries = 3) {
 
 // ---------- 高层 ----------
 // 应用灯光效果（无线 0x13 协议）。effect: SW 槽位号（LedOpt 首列，1-18/21；0=关；与有线 520B 同域同存储）；
-// opts: {color, colorful, brightness, speed}
+// opts: {color, colorful, brightness, speed, gen, lightHw}（gen/lightHw 见 protocol.buildConfigWrite）
 // 返回 true=设备有回显（交互正常）；false=全程无回显（大概率 2.4G 休眠，需按键唤醒重试）
 export async function hidApplyEffect(dev, effect, opts, log, baseFrames) {
   const isOff = effect === 0;
   const colorMode = opts.forceColorMode ?? ((opts.colorful || opts.color) ? 0x01 : 0x03);
-  log && log('in', `写效果 SW#${effect} 亮度=${opts.brightness} 速度=${opts.speed} ${opts.colorful ? '炫彩' : (opts.color ? `RGB(${opts.color})` : '')}`);
+  log && log('in', `写效果 SW#${effect} 亮度=${opts.brightness}（${Array.isArray(opts.lightHw) ? `HW=${opts.lightHw[opts.brightness]}` : '直写档位'}） 速度=${opts.speed} ${opts.colorful ? '炫彩' : (opts.color ? `RGB(${opts.color})` : '')}`);
   log && log('in', 'Phase1 读取配置…');
   const cfg = baseFrames ?? (await readConfig(dev, log));
   const got = !!cfg;
   if (!got) log && log('er', '读配置失败，使用出厂模板写入');
-  log && log('in', 'Phase2 写配置…');
   const wr = P.buildConfigWrite(got ? cfg : null, {
-    effect: isOff ? 0 : effect, // SW 槽位号（与有线 520B 配置同域同存储）
+    effect: isOff ? 0 : effect, // 效果字节 = UI 号（两代同域，真机逐效果验证）
     colorMode,
     brightness: isOff ? 0 : opts.brightness,
     speed: opts.speed,
     colorful: !!opts.colorful,
     colorRgb: isOff ? null : (opts.colorful ? null : opts.color), // 自定义色 → 第9片 idx3-5
     clearColor: !isOff && !(opts.colorful || opts.color), // 无色效果清帧9残留色（花开富贵频闪根因之一）
-    animMode: !!opts.anim, // 动画族效果（花开富贵）：blob[3]=02 表驱动渲染
+    animMode: !!opts.anim, // 动画族效果（花开富贵）：blob[3]=02 表驱动渲染（仅 fw24；fw26 该字节为去抖域）
+    gen: opts.gen,
+    lightHw: opts.lightHw,
   });
   // 顺序：配置 → 调色板（自定义色=整片灌色；无自定义色=默认彩虹表——花开富贵等
-  // 无色效果读每键表，残留单色=单色频闪、零表=黑，均真机复现）→ 保存。
+  // 读每键表，残留单色=单色频闪、零表=黑，均真机复现）→ 保存。
   log && log('in', 'Phase2 写调色板…');
   const palFrames = isOff ? P.buildPalette(null)
     : opts.anim ? P.buildPaletteAnim()
@@ -176,13 +175,20 @@ export async function hidApplyEffect(dev, effect, opts, log, baseFrames) {
   return true;
 }
 
+// 有线设置类下发（睡眠/去抖/Tap）：复用 hidApplyEffectWired 的读改写+变体机制，
+// effect=null 不动效果字节、forceColorMode=null 不动色彩模式（buildConfigWrite 对 null 跳过）。
+// patch 见 protocol.buildConfigWrite（fw26: sleepHw/tapSens/debounce；fw24: sleepIndex/…）。
+export async function hidSetSettingWired(dev, patch, log) {
+  return hidApplyEffectWired(dev, null, { forceColorMode: null, ...patch }, log);
+}
+
 // 每键 RGB。keyColors: {ledIndex: [r,g,b]}；selfFw: 该型号自定义模式固件号
-export async function hidApplyPerKey(dev, keyColors, selfFw, log) {
+export async function hidApplyPerKey(dev, keyColors, selfFw, log, model = null) {
   log && log('in', `下发每键 RGB（${Object.keys(keyColors).length} 键，自定义模式 fw#${selfFw}）`);
   log && log('in', 'Phase1 读取配置…');
   const cfg = await readConfig(dev, log);
   log && log('in', 'Phase2 写配置（自定义模式）…');
-  const wr = P.buildConfigWrite(cfg ?? null, { effect: selfFw, colorMode: 0x01 });
+  const wr = P.buildConfigWrite(cfg ?? null, { effect: selfFw, colorMode: 0x01, gen: P.cfgGenOf(model), lightHw: P.modelLightHw(model) });
   await txBulk(dev, wr, '配置', log);
   log && log('in', 'Phase3 写每键颜色…');
   await txBulk(dev, P.buildPerKey(keyColors), '每键', log);
@@ -191,34 +197,60 @@ export async function hidApplyPerKey(dev, keyColors, selfFw, log) {
   log && log('ok', '每键颜色已下发');
 }
 
-export async function hidSetSleep(dev, minutes, log) {
-  const idx = P.sleepIndexOf(minutes);
-  log && log('in', `设置睡眠 ${minutes} 分钟（档位索引 ${idx}）`);
+// 设置类下发（睡眠/去抖/Tap）：model 供 gen 与档位表选择，详见 protocol.js modelSleepTable。
+export async function hidSetSleep(dev, minutes, log, model = null) {
+  const gen = P.cfgGenOf(model);
+  const tbl = P.modelSleepTable(model);
+  const idx = P.sleepUiIndexOf(tbl, minutes);
+  log && log('in', `设置睡眠 ${minutes} 分钟（档位 ${idx} → ${gen === 'fw26' ? `HW 值 ${tbl.hw[idx]} @blob[24]` : `索引 ${tbl.hw[idx]} @blob[8]`}）`);
   const cfg = await readConfig(dev, log);
   if (!cfg) { log && log('er', '读配置失败'); return; }
-  const wr = P.buildConfigWrite(cfg, { sleepIndex: idx });
+  const patch = gen === 'fw26'
+    ? { sleepHw: tbl.hw[idx] & 0xff, gen }
+    : { sleepIndex: idx, gen };
+  const wr = P.buildConfigWrite(cfg, patch);
   await txBulk(dev, wr, '配置', log);
   await txRx(dev, P.buildSave(), log, 50);
   log && log('ok', '睡眠时间已下发');
 }
 
-export async function hidSetDebounce(dev, level, log) {
-  log && log('in', `设置按键去抖 ${level} 档`);
+export async function hidSetDebounce(dev, level, log, model = null) {
+  const gen = P.cfgGenOf(model);
+  log && log('in', `设置按键去抖 ${level} 档（${gen === 'fw26' ? `blob[3]=${level}` : `blob[1,2]=${level - 1}`}）`);
   const cfg = await readConfig(dev, log);
-  const wr = P.buildConfigWrite(cfg ?? null, { debounce: level });
+  const wr = P.buildConfigWrite(cfg ?? null, { debounce: level, gen });
   await txBulk(dev, wr, '配置', log);
   await txRx(dev, P.buildSave(), log, 50);
   log && log('ok', '按键去抖已下发');
 }
 
-export async function hidSetTapSens(dev, level, log) {
-  log && log('in', `设置 Tap 灵敏度 ${level} 档`);
+export async function hidSetTapSens(dev, level, log, model = null) {
+  const gen = P.cfgGenOf(model);
+  log && log('in', `设置 Tap 灵敏度 ${level} 档（${gen === 'fw26' ? 'blob[22]' : 'blob[7]'}）`);
   const cfg = await readConfig(dev, log);
   if (!cfg) { log && log('er', '读配置失败'); return; }
-  const wr = P.buildConfigWrite(cfg, { tapSens: level });
+  const wr = P.buildConfigWrite(cfg, { tapSens: level, gen });
   await txBulk(dev, wr, '配置', log);
   await txRx(dev, P.buildSave(), log, 50);
   log && log('ok', 'Tap 灵敏度已下发');
+}
+
+// 旋钮模式（仅 KB.ini WheelMode>0 的型号，如 Hi75 RGB）：custom=true 写 Cfg[26]=6
+// （固件把旋钮当普通键——改键生效的前提），false 写 0（恢复原生旋钮行为）。
+// 驱动 FillCfg 变体 B 的 nWheelMode 同款取值（逆向 0x49334c "nWheelMode=%d"）。
+// 仅无线 0x13 通道（index.js 调用处门控）。有线版**有意未实现**（守"写侧命令未确认不盲发"）：
+// 有线配置写应为 cmd 04（bit-7 规则 84↔04，族内 83↔03/85↔05 已真机实证、04 未验证），需先在
+// 旋钮型号 + 有线连接下验证：cmd 84 读 400B → 原样 cmd 04 写回（驱动原生帧式，参照
+// probe-device.mjs 的 writeMatrix 改 cmd=0x04/sub=0）→ 84 再读逐字节比对。验证通过后仿
+// hidSetKnobMode 写 hidSetKnobModeWired 并放开 index.js 的 canSend13 门控。
+export async function hidSetKnobMode(dev, custom, log) {
+  log && log('in', `旋钮模式联动：${custom ? '自定义（按改键指派工作）' : '原生（默认旋钮行为）'}`);
+  const cfg = await readConfig(dev, log);
+  if (!cfg) { log && log('warn', '旋钮模式联动：读配置失败，跳过（若已改指旋钮键，原生旋钮行为可能覆盖改键）'); return; }
+  const wr = P.buildConfigWrite(cfg, { knobCustom: custom });
+  await txBulk(dev, wr, '配置', log);
+  await txRx(dev, P.buildSave(), log, 50);
+  log && log('ok', custom ? '旋钮模式：自定义 ✓' : '旋钮模式：原生 ✓');
 }
 
 export async function hidFactoryReset(dev, log) {
@@ -317,47 +349,45 @@ export async function sendMacro13(dev, blob, log) {
   return echoAny;
 }
 
-// 宏编排：① 全量宏内容（cmd 0x03）② 各层键位读改写（cmd 0x41 读 → 补丁宏键/命令键 → cmd 0x01 写）。
-// macroKeysByLayer: {layer: {keyIndex: {macroId, repeat, loopCode}}}；cmdKeysByLayer: {layer: {keyIndex: hwDword}}
-// 返回 {sent, assigned}；有线通道（无 0x13 输出端点）返回 {error:'wired'}。
-export async function hidApplyMacros(dev, macros, macroKeysByLayer, keyCount, log, cmdKeysByLayer) {
-  const { blob, count } = P.buildMacroBlob(macros);
-  log && log('in', `宏打包：${count} 条 / ${blob.length}B（表 ${count * 4}B + 数据 ${blob.length - count * 4}B）`);
-  log && log('tx', `blob 头 32B: ${P.hex(blob.subarray(0, 32))}`);
-  const echoed = await sendMacro13(dev, blob, log);
-  if (!echoed) { log && log('er', '宏内容全程无回显——键盘可能在休眠：按任意键唤醒后重试'); return { sent: false }; }
+// 改键/宏编排：① 全量宏内容（cmd 0x03，无宏跳过）② 各层键位读改写（cmd 0x41 读 → 补丁 → cmd 0x01 写）。
+// patchByLayer: {layer: {槽位: dword}}——槽位为固件矩阵槽（model.keys[].matrix，非 K 序号），
+// dword 由 protocol.fnToDword 统一编码（普通键/组合/多媒体/灯光/宏/命令全类型）。
+// slotCount = max(matrix)+1。返回 {sent, assigned}。
+export async function hidApplyMacros(dev, macros, patchByLayer, slotCount, log, opts = {}) {
+  let count = 0;
+  if (macros.length) {
+    const { blob } = P.buildMacroBlob(macros);
+    count = macros.length;
+    log && log('in', `宏打包：${count} 条 / ${blob.length}B（表 ${count * 4}B + 数据 ${blob.length - count * 4}B）`);
+    log && log('tx', `blob 头 32B: ${P.hex(blob.subarray(0, 32))}`);
+    const echoed = await sendMacro13(dev, blob, log);
+    if (!echoed) { log && log('er', '宏内容全程无回显——键盘可能在休眠：按任意键唤醒后重试'); return { sent: false }; }
+  }
   let assigned = 0;
-  const layers = new Set([...Object.keys(macroKeysByLayer ?? {}), ...Object.keys(cmdKeysByLayer ?? {})]);
-  for (const layerStr of layers) {
+  const slots = opts.matrixLen ?? slotCount; // 驱动按 MatrixLen 全层下发（缺省 128），非 max(matrix)+1
+  for (const [layerStr, patch] of Object.entries(patchByLayer ?? {})) {
+    const entries = Object.entries(patch);
+    if (!entries.length) continue;
     const layer = +layerStr;
-    const mk = macroKeysByLayer?.[layerStr] ?? {};
-    const ck = cmdKeysByLayer?.[layerStr] ?? {};
-    if (!Object.keys(mk).length && !Object.keys(ck).length) continue;
-    const byteLen = keyCount * 4;
-    log && log('in', `层${layer}: 读回键位表（${keyCount} 键）…`);
+    const byteLen = slots * 4;
+    log && log('in', `层${layer}: 读回键位表（${slots} 槽${opts.matrixLen && opts.matrixLen > slotCount ? '（MatrixLen 全层域）' : ''}）…`);
     const cur = await readMatrix13(dev, layer, byteLen, log);
     if (!cur || cur.length < byteLen) {
-      log && log('er', `层${layer} 键位表读取失败，跳过该层指派（宏内容已写入）`);
+      log && log('er', `层${layer} 键位表读取失败，跳过该层指派${count ? '（宏内容已写入）' : ''}`);
       continue;
     }
     const dwords = [];
-    for (let i = 0; i < keyCount; i++) dwords.push((cur[i * 4] | (cur[i * 4 + 1] << 8) | (cur[i * 4 + 2] << 16) | (cur[i * 4 + 3] << 24)) >>> 0);
-    for (const [kIdx, mkv] of Object.entries(mk)) {
-      const mIdx = macros.findIndex((m) => m.id === mkv.macroId);
-      if (mIdx < 0) continue;
-      const i = +kIdx;
-      if (i >= 0 && i < keyCount) { dwords[i] = P.macroKeyDword(mIdx, mkv.repeat ?? 1, mkv.loopCode ?? P.MACRO_LOOP_CODES.once); assigned++; }
+    for (let i = 0; i < slots; i++) dwords.push((cur[i * 4] | (cur[i * 4 + 1] << 8) | (cur[i * 4 + 2] << 16) | (cur[i * 4 + 3] << 24)) >>> 0);
+    for (const [slotStr, dw] of entries) {
+      const slot = +slotStr;
+      if (slot >= 0 && slot < slots && Number.isInteger(dw)) { dwords[slot] = dw >>> 0; assigned++; }
     }
-    let cmdN = 0;
-    for (const [kIdx, hw] of Object.entries(ck)) {
-      const i = +kIdx;
-      if (i >= 0 && i < keyCount && Number.isInteger(hw)) { dwords[i] = hw >>> 0; cmdN++; }
-    }
-    log && log('in', `层${layer}: 补丁 ${Object.keys(mk).length} 宏键 + ${cmdN} 命令键后写回…`);
+    if (opts.crc) dwords[slots - 1] = 0xa5a5a5a5; // CRC 型号末槽标记（驱动 FillMatrix 同款）
+    log && log('in', `层${layer}: 补丁 ${entries.length} 键后写回…`);
     await writeMatrix13(dev, layer, dwords, log);
     await sleep(50);
   }
-  log && log('ok', `下发完成（宏 ${count} 条，指派 ${assigned} 键 + 命令键）——回放由键盘固件执行，无需本页保持打开`);
+  log && log('ok', `下发完成（宏 ${count} 条，键位指派 ${assigned} 键）——回放由键盘固件执行，无需本页保持打开`);
   return { sent: true, assigned };
 }
 
@@ -381,7 +411,7 @@ export async function readMatrixWired(dev, layer, byteLen, log) {
   let got = 0;
   for (let i = 0; i < nChunks; i++) {
     const want = Math.min(0x200, byteLen - i * 0x200);
-    const resp = await feat520Exchange(dev, 0x83, layer, i, want, null, log, 6, nChunks);
+    const resp = await feat520Exchange(dev, 0x83, layer, i, want, null, log, null, nChunks);
     const data = resp.slice(P.FEAT520_DATA_OFF, P.FEAT520_DATA_OFF + want);
     if (data.length < want) { log && log('er', `有线键位层${layer} 读响应不足（${data.length}/${want}B）`); return i === 0 ? null : out; }
     out.set(data, i * 0x200);
@@ -390,11 +420,13 @@ export async function readMatrixWired(dev, layer, byteLen, log) {
   return got === byteLen ? out : out.subarray(0, got);
 }
 
-// 写键位层（有线）：cmd 03。变体①=驱动原生（sub=layer、帧[4]=块数、len=byteLen）；
-// 变体②=灯光写真机验证过的 d4/400/40 风格（sub=0xd4、len=0x400、flags=0x40）。
-// 写后 83/layer 读回校验补丁键，命中即缓存变体（模块级）。
+// 写键位层（有线）：cmd 03。变体①=驱动原生（sub=layer、帧[4]=块数、len=byteLen，块间 20ms
+// ——K65 版 SetMatrix 的 AccessData 包间等待参数，2026-10 实证）；变体②=灯光写真机验证过的
+// d4/400/40 风格（sub=0xd4、len=0x400、flags=0x40）。
+// 写后 83/layer 读回校验补丁键，命中即缓存变体（模块级）。末槽 A5A5A5A5 标记（CRC 型号）
+// 不计入 miss——固件可能不回读该标记字节。
 let wiredMatrixVariant = null;
-export async function writeMatrixWired(dev, layer, dwords, log) {
+export async function writeMatrixWired(dev, layer, dwords, log, opts = {}) {
   const byteLen = dwords.length * 4;
   const bytes = new Uint8Array(byteLen);
   dwords.forEach((d, i) => { bytes[i * 4] = d & 0xff; bytes[i * 4 + 1] = (d >> 8) & 0xff; bytes[i * 4 + 2] = (d >> 16) & 0xff; bytes[i * 4 + 3] = (d >>> 24) & 0xff; });
@@ -403,14 +435,14 @@ export async function writeMatrixWired(dev, layer, dwords, log) {
     { label: `驱动原生 sub=layer 块数=${nChunks}`, run: async () => {
       for (let i = 0; i < nChunks; i++) {
         const chunk = bytes.subarray(i * 0x200, Math.min((i + 1) * 0x200, byteLen));
-        await feat520Exchange(dev, 0x03, layer, i, chunk.length, chunk, log, 6, nChunks);
-        if (i + 1 < nChunks) await sleep(70);
+        await feat520Exchange(dev, 0x03, layer, i, chunk.length, chunk, log, null, nChunks);
+        if (i + 1 < nChunks) await sleep(20);
       }
     } },
     { label: 'd4/400/40（灯光写同款）', run: async () => {
       const payload = new Uint8Array(0x400);
       payload.set(bytes.subarray(0, Math.min(0x200, byteLen)));
-      await feat520Exchange(dev, 0x03, 0xd4, 0, 0x400, payload, log, 6, 0x40);
+      await feat520Exchange(dev, 0x03, 0xd4, 0, 0x400, payload, log, null, 0x40);
     } },
   ];
   const variants = wiredMatrixVariant ? [wiredMatrixVariant] : mkVariants();
@@ -418,11 +450,12 @@ export async function writeMatrixWired(dev, layer, dwords, log) {
     log && log('in', `[有线] 写键位层${layer}（${v.label}）…`);
     try { await v.run(); } catch (e) { log && log('er', `[有线] 变体发送失败（${v.label}）: ${e.message}`); continue; }
     await sleep(50);
-    // 读回校验：全部键位要与目标一致（404B 单块，无 seq≠0 假零风险）
+    // 读回校验：全部键位要与目标一致（512B 单块，无 seq≠0 假零风险）
     const back = await readMatrixWired(dev, layer, byteLen, log);
     if (!back) continue;
     let hit = 0, miss = 0;
     for (let i = 0; i < dwords.length; i++) {
+      if (opts.crc && i === dwords.length - 1) continue; // 末槽 A5A5A5A5 标记不参与判定
       const now = (back[i * 4] | (back[i * 4 + 1] << 8) | (back[i * 4 + 2] << 16) | (back[i * 4 + 3] << 24)) >>> 0;
       if (now === (dwords[i] >>> 0)) hit++; else miss++;
     }
@@ -437,7 +470,8 @@ export async function writeMatrixWired(dev, layer, dwords, log) {
   return false;
 }
 
-// 写宏内容（有线）：cmd 05 sub=0，blob 按 512B 分块（帧[4]=总块数，驱动块间 ~70ms）。
+// 写宏内容（有线）：cmd 05 sub=0，blob 按 512B 分块（帧[4]=总块数，驱动块间 20ms——
+// K65 版 AccessData 包间等待参数，2026-10 实证；旧值 70ms 系重试间隔的误读）。
 // 写后 cmd 85 读回校验首块（blob>512B 时读侧 seq≠0 有假零风险，仅信任首块）。
 // 85 读从未在真机证实过内容语义（扫描时为空）——校验不过只记警告不算失败。
 let wiredMacroVariant = null;
@@ -447,18 +481,19 @@ export async function sendMacroWired(dev, blob, log) {
     const list = [{ label: `驱动原生 sub=0 块数=${nChunks}`, run: async () => {
       for (let i = 0; i < nChunks; i++) {
         const chunk = blob.subarray(i * 0x200, Math.min((i + 1) * 0x200, blob.length));
-        await feat520Exchange(dev, 0x05, 0, i, chunk.length, chunk, log, 6, nChunks);
-        if (i + 1 < nChunks) await sleep(70);
+        await feat520Exchange(dev, 0x05, 0, i, chunk.length, chunk, log, null, nChunks);
+        if (i + 1 < nChunks) await sleep(20);
       }
     } }];
     if (blob.length <= 0x200) list.push({ label: 'd4/400/40（灯光写同款）', run: async () => {
       const payload = new Uint8Array(0x400);
       payload.set(blob);
-      await feat520Exchange(dev, 0x05, 0xd4, 0, 0x400, payload, log, 6, 0x40);
+      await feat520Exchange(dev, 0x05, 0xd4, 0, 0x400, payload, log, null, 0x40);
     } });
     return list;
   };
   const variants = wiredMacroVariant ? [wiredMacroVariant] : mkVariants();
+  // 首次变体搜索 = 未验证写路径：显式确认
   for (const v of variants) {
     log && log('in', `[有线] 写宏内容 ${blob.length}B / ${nChunks} 块（${v.label}）…`);
     try { await v.run(); } catch (e) { log && log('er', `[有线] 宏变体发送失败（${v.label}）: ${e.message}`); continue; }
@@ -488,51 +523,95 @@ export async function sendMacroWired(dev, blob, log) {
 // 宏存储无读回通道；驱动 hwParam 容量为内置静态值）——下发前按此上限拦截。
 export const MACRO_DRIVER_LIMIT = 0x2800; // 10240B
 
-// 有线宏编排：① 宏内容（cmd 05 分块）② 各层键位读改写（cmd 83 读 → 补丁宏键/命令键 → cmd 03 写）。
-// 返回 { sent, assigned, macroState }；macroState: 'skipped'|'verified'|'sent'|'failed'。
-export async function hidApplyMacrosWired(dev, macros, macroKeysByLayer, cmdKeysByLayer, keyCount, log) {
+// 有线改键/宏编排：① 宏内容（cmd 05 分块，无宏跳过）② 各层键位读改写（cmd 83 读 → 补丁 → cmd 03 写）。
+// patchByLayer: {layer: {槽位: dword}}（同 hidApplyMacros）。返回 { sent, assigned, macroState }。
+// opts.matrixLen/crc：K65 等按 MatrixLen（缺省 128）全层下发、末槽 A5A5A5A5（驱动 FillMatrix 实证）。
+export async function hidApplyMacrosWired(dev, macros, patchByLayer, slotCount, log, opts = {}) {
   let macroState = 'skipped';
   if (macros.length) {
     const { blob, count } = P.buildMacroBlob(macros);
     log && log('in', `[有线] 宏打包：${count} 条 / ${blob.length}B`);
     log && log('tx', `blob 头 32B: ${P.hex(blob.subarray(0, 32))}`);
     macroState = await sendMacroWired(dev, blob, log);
+    if (macroState === 'cancelled') {
+      // 宏内容未写入就继续指派会把按键绑到空宏上——整体中止
+      log && log('er', '[有线] 宏写入已取消，跳过键位指派');
+      return { sent: false, assigned: 0, macroState };
+    }
   }
   let assigned = 0;
-  const layers = new Set([...Object.keys(macroKeysByLayer ?? {}), ...Object.keys(cmdKeysByLayer ?? {})]);
-  for (const layerStr of layers) {
+  const slots = opts.matrixLen ?? slotCount;
+  for (const [layerStr, patch] of Object.entries(patchByLayer ?? {})) {
+    const entries = Object.entries(patch);
+    if (!entries.length) continue;
     const layer = +layerStr;
-    const mk = macroKeysByLayer?.[layerStr] ?? {};
-    const ck = cmdKeysByLayer?.[layerStr] ?? {};
-    if (!Object.keys(mk).length && !Object.keys(ck).length) continue;
-    const byteLen = keyCount * 4;
-    log && log('in', `[有线] 层${layer}: 读键位表（cmd 83，${keyCount} 键）…`);
+    const byteLen = slots * 4;
+    log && log('in', `[有线] 层${layer}: 读键位表（cmd 83，${slots} 槽${opts.matrixLen && opts.matrixLen > slotCount ? '（MatrixLen 全层域）' : ''}）…`);
     const cur = await readMatrixWired(dev, layer, byteLen, log);
     if (!cur || cur.length < byteLen) { log && log('er', `[有线] 层${layer} 键位表读取失败，跳过该层指派`); continue; }
     const dwords = [];
-    for (let i = 0; i < keyCount; i++) dwords.push((cur[i * 4] | (cur[i * 4 + 1] << 8) | (cur[i * 4 + 2] << 16) | (cur[i * 4 + 3] << 24)) >>> 0);
-    for (const [kIdx, mkv] of Object.entries(mk)) {
-      const mIdx = macros.findIndex((m) => m.id === mkv.macroId);
-      if (mIdx < 0) continue;
-      const i = +kIdx;
-      if (i >= 0 && i < keyCount) { dwords[i] = P.macroKeyDword(mIdx, mkv.repeat ?? 1, mkv.loopCode ?? P.MACRO_LOOP_CODES.once); assigned++; }
+    for (let i = 0; i < slots; i++) dwords.push((cur[i * 4] | (cur[i * 4 + 1] << 8) | (cur[i * 4 + 2] << 16) | (cur[i * 4 + 3] << 24)) >>> 0);
+    for (const [slotStr, dw] of entries) {
+      const slot = +slotStr;
+      if (slot >= 0 && slot < slots && Number.isInteger(dw)) { dwords[slot] = dw >>> 0; assigned++; }
     }
-    for (const [kIdx, hw] of Object.entries(ck)) {
-      const i = +kIdx;
-      if (i >= 0 && i < keyCount && Number.isInteger(hw)) { dwords[i] = hw >>> 0; assigned++; }
-    }
-    const ok = await writeMatrixWired(dev, layer, dwords, log);
+    if (opts.crc) dwords[slots - 1] = 0xa5a5a5a5; // CRC 型号末槽标记（驱动 FillMatrix 同款）
+    const ok = await writeMatrixWired(dev, layer, dwords, log, opts);
     if (!ok) log && log('warn', `[有线] 层${layer} 键位写未通过校验（指派可能未生效）`);
     await sleep(50);
   }
-  const stateTxt = { skipped: '无宏内容', verified: '宏内容读回验证 ✓', sent: '宏内容已发送（读回未证实）', failed: '宏内容写入失败' }[macroState];
+  const stateTxt = { skipped: '无宏内容', verified: '宏内容读回验证 ✓', sent: '宏内容已发送（读回未证实）', failed: '宏内容写入失败', cancelled: '用户取消' }[macroState];
   log && log(assigned > 0 || macroState === 'verified' ? 'ok' : 'warn',
     `[有线] 完成：${stateTxt}，键位指派 ${assigned} 键（无已知保存命令，断电后是否保留未证实）`);
   return { sent: assigned > 0 || macroState === 'verified', assigned, macroState };
 }
-// 电量查询（0x4A，仅无线通道）。响应 [0x13][0x4A][npkg][idx][oper|len=0x02][百分比][状态标志]…
+// 电量查询路径 ①（K65，fw26 世代；逆向自 K65 版 OemDrv CDevG5MS::GetPower @0x4946E0）：
+//   feat520 校验和布局帧（cmd@2、ck=Σ字节2..519）cmd=0x09 sub=0x01 len=1 → GetFeature(9)
+//   应答数据@偏移 8 共 1 字节 = 百分比，应答 buf[2] 回显 0x09。仅 k65 帧模式可用
+//  （LEOBOG fw24 不识别 cmd@2 布局，byte[1] 校验和会被当命令派发——严禁发给 fw24）。
+//   ×3 重试 / 60ms 间隔（驱动同款）。返回 { percent } 或 null。
+export async function hidReadBatteryWired(dev, log) {
+  if (getFeat520Mode() !== 'k65') {
+    log && log('er', '电量(GetPower)：仅 K65（fw26）帧模式支持——LEOBOG fw24 无此通道');
+    return null;
+  }
+  const R = feat520Rid(dev);
+  const frame = P.buildFeat520FrameK65(P.BATTERY_CMD_K65, P.BATTERY_SUB_K65, 0, 1, null, 1);
+  for (let a = 0; a < 3; a++) {
+    try {
+      await dev.sendFeatureReport(R, frame.slice(1));
+      log && log('tx', `F${R} 520B[GetPower] [${R.toString(16)} ${frame[1].toString(16).padStart(2, '0')} 09 01 01 00 01 00 …]`);
+    } catch (e) {
+      log && log('er', `电量(GetPower) 发送失败: ${e.message}`);
+      return null;
+    }
+    await sleep(30);
+    try {
+      const dv = await dev.receiveFeatureReport(R);
+      const b = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+      log && log('rx', `F${R} ${P.hex(b.slice(0, 16))}${b.length > 16 ? ' …' : ''}`);
+      if (b[2] === P.BATTERY_CMD_K65 && b.length >= 9) {
+        const percent = b[8];
+        if (percent >= 0 && percent <= 100) {
+          log && log('ok', `电量 ${percent}%（GetPower cmd09/01，应答数据@8）`);
+          return { percent };
+        }
+        log && log('er', `电量应答值越界（${percent}），视为无效`);
+      }
+    } catch (e) {
+      log && log('er', `电量(GetPower) GetFeature 失败: ${e.message}`);
+    }
+    await sleep(60);
+  }
+  log && log('er', '电量查询无响应（键盘可能已休眠，按键唤醒后重试）');
+  return null;
+}
+
+// 电量查询路径 ②（LEOBOG 2.4G 接收器，0x13 cmd 0x4A）。响应 [0x13][0x4A][npkg][idx][oper|len=0x02][百分比][状态标志]…
 // 请求写入会先回一帧 echo（payload 全 0），以 byte[4]>0 或 byte[5]/byte[6]≠0 区分真实响应；
 // 键盘 2.4G 闲置快睡后通常无响应（需按键唤醒）→ 超时返回 null。
+// ⚠ 2026-10 K65 版驱动复核：0x4A 在该世代是 GetOnBoard（板载配置档号）而非电量——
+// 此路径仅维持 LEOBOG（fw24）历史行为，K65 走 hidReadBatteryWired（GetPower）。
 export async function hidReadBattery(dev, log) {
   const req = P.buildFrame(P.CMD_BATTERY, 1, 0, new Uint8Array(15));
   await dev.sendReport(req[0], req.slice(1));
@@ -785,12 +864,12 @@ async function psdViaFeat6(dev, log) {
         const b = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
         log && log('rx', `F06 ${P.hex(b.slice(0, 32))}${b.length > 32 ? ' …' : ''}`);
         // TLV 解析：[05][cmd×2][…][lenLE][data]——data 恰为 6 字节且形如 KB.ini 的 PSD
-        //（9 型号 PSD 均为 03 00 00 00 xx yy）才作为候选返回，其余（如常量 ef 24…）继续尝试
+        //（LEOBOG 为 03 00 00 00 xx yy；K65 首字节 06——只要求首字节非零 + 中间三字节为零）
         for (let off = 4; off + 8 <= Math.min(b.length, 24); off++) {
           const len = b[off] | (b[off + 1] << 8);
           if (len === 6 && b[off + 2] !== undefined) {
             const cand = b.slice(off + 2, off + 8);
-            if (cand[0] === 0x03 && cand[1] === 0 && cand[2] === 0 && cand[3] === 0 && (cand[4] !== 0 || cand[5] !== 0)) {
+            if (cand[0] !== 0 && cand[1] === 0 && cand[2] === 0 && cand[3] === 0 && (cand[4] !== 0 || cand[5] !== 0)) {
               log && log('ok', `GetPSD(3632) TLV@${off} = ${P.hex(cand)}`);
               return { psd: cand, reason: 'ok', blob: null };
             }
@@ -819,7 +898,10 @@ async function psdViaFeat6(dev, log) {
 // R 由固件字段选择：cfg 字段==0x18（KB.ini Fw=24）用 6，否则用 9 —— 两种都试。
 // 无校验和（与 0x8805 类不同）。真机键盘 feat[6] 在 Chrome 可见接口上存在 → 网页端可走。
 async function psdVia520(dev, log) {
-  for (const rid of [6, 9]) {
+  // rid 候选：6 = LEOBOG（fw24）；9 = K65 有线（k65 实证）；0x0a = K65 2.4G 接口
+  //（258a:0150 只声明 feat[5,6,a]，F6 被固件拒、F9 未声明——0x0a 是该接口上 520B
+  // exchanger 的候选落点，真机验证待做；cmd 0x82 是读命令，失败只记日志无副作用）。
+  for (const rid of [6, 9, 0x0a]) {
     if (!hasFeatureReport(dev, rid)) continue;
     for (let seq = 0; seq < 2; seq++) {
       const frame = new Uint8Array(520);
@@ -837,9 +919,10 @@ async function psdVia520(dev, log) {
         const dv = await dev.receiveFeatureReport(rid);
         const b = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
         log && log('rx', `F${rid} ${P.hex(b.slice(0, 24))}${b.length > 24 ? ' …' : ''}`);
-        // PSD = Windows 应答 buf+8 → Chrome data+7；宽容按形状扫描（9 型号均为 03 00 00 00 xx yy）
+        // PSD = Windows 应答 buf+8 → Chrome data+7；宽容按形状扫描（9 型号 PSD 均为 xx 00 00 00 yy zz
+        // ——LEOBOG 首字节 03，K65 真机实证 06 00 00 00 00 37，只要求首字节非零 + 中间三字节为零）
         for (let off = 0; off + 6 <= Math.min(b.length, 24); off++) {
-          if (b[off] === 0x03 && b[off + 1] === 0 && b[off + 2] === 0 && b[off + 3] === 0 && (b[off + 4] !== 0 || b[off + 5] !== 0)) {
+          if (b[off] !== 0 && b[off + 1] === 0 && b[off + 2] === 0 && b[off + 3] === 0 && (b[off + 4] !== 0 || b[off + 5] !== 0)) {
             const psd = b.slice(off, off + 6);
             log && log('ok', `GetPSD(520B) = ${P.hex(psd)}`);
             return { psd, reason: 'ok', blob: null };
@@ -892,44 +975,97 @@ async function psdViaFeat9(dev, log) {
     log && log('rx', `${P.hex(r.slice(0, 24))} (input)`);
   }
   await sleep(220);
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      await dev.sendFeatureReport(0x09, build(0x05, 0x01, 6).slice(1));
-      log && log('tx', 'F09 (520B GetPSD 帧 cmd05) …');
-    } catch (e) {
-      log && log('er', `GetPSD(520B) 发送失败: ${e.message}`);
-      return { psd: null, reason: 'send-failed', blob: null };
-    }
-    for (let i = 0; i < 6; i++) {
-      const r = await readReport(dev, 260);
-      if (!r) break;
-      log && log('rx', `${P.hex(r.slice(0, 24))} (input)`);
-      // 应答解析（宽容）：[01]/[0A] 标记 + PSD×6，或 PSD 形状直配（03 00 00 00 xx yy）
-      for (let off = 0; off + 7 <= Math.min(r.length, 24); off++) {
-        if ((r[off] === 0x01 || r[off] === 0x0a) && r[off + 1] === 0x03 && r[off + 2] === 0 && r[off + 5] !== 0) {
-          const psd = r.slice(off + 1, off + 7);
-          log && log('ok', `GetPSD(520B) = ${P.hex(psd)}`);
-          return { psd, reason: 'ok', blob: null };
+  // K65 的 GetPSD 与 AccessData 族同 cmd（0x82/01，len=6；逆向自 K65 版 OemDrv 0x493360 族）
+  for (const [cmd, sub] of [[0x82, 0x01], [0x05, 0x01]]) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await dev.sendFeatureReport(0x09, build(cmd, sub, 6).slice(1));
+        log && log('tx', `F09 (520B GetPSD 帧 cmd${cmd.toString(16)}) …`);
+      } catch (e) {
+        log && log('er', `GetPSD(520B) 发送失败: ${e.message}`);
+        return { psd: null, reason: 'send-failed', blob: null };
+      }
+      for (let i = 0; i < 6; i++) {
+        const r = await readReport(dev, 260);
+        if (!r) break;
+        log && log('rx', `${P.hex(r.slice(0, 24))} (input)`);
+        // 应答解析（宽容）：[01]/[0A] 标记 + PSD×6，或 PSD 形状直配（03 00 00 00 xx yy）
+        for (let off = 0; off + 7 <= Math.min(r.length, 24); off++) {
+          if ((r[off] === 0x01 || r[off] === 0x0a) && r[off + 1] === 0x03 && r[off + 2] === 0 && r[off + 5] !== 0) {
+            const psd = r.slice(off + 1, off + 7);
+            log && log('ok', `GetPSD(520B) = ${P.hex(psd)}`);
+            return { psd, reason: 'ok', blob: null };
+          }
         }
       }
+      // feature 读回：AccessData 应答数据在偏移 8（GetFeature(9, 520B)，驱动同款），
+      // 布局 = legacy（cmd 回显在 byte[1]，真机实证 2026-10）
+      try {
+        const dv = await dev.receiveFeatureReport(0x09);
+        const b = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+        log && log('rx', `F09 ${P.hex(b.slice(0, 24))}${b.length > 24 ? ' …' : ''} (feature)`);
+        if (b[1] === cmd) { // byte[1] = cmd 回显
+          for (let off = 8; off + 6 <= Math.min(b.length, 24); off++) {
+            if (b[off] !== 0 && b[off + 1] === 0 && b[off + 2] === 0 && b[off + 3] === 0 && (b[off + 4] !== 0 || b[off + 5] !== 0)) {
+              const cand = b.slice(off, off + 6);
+              log && log('ok', `GetPSD(520B K65) = ${P.hex(cand)}`);
+              return { psd: cand, reason: 'ok', blob: null };
+            }
+          }
+          const nz = b.findIndex((x) => x !== 0);
+          if (b.length >= 16 && nz >= 0) return { psd: null, reason: 'timeout', blob: b.slice(0, 256) };
+        }
+      } catch { /* feature 读回不可用则只靠中断 IN */ }
+      await sleep(150);
     }
-    await sleep(150);
   }
   return { psd: null, reason: 'timeout', blob: null };
 }
 
 // ---------- 520B feature 帧协议（有线键盘；格式见 protocol.js）----------
-// 交换原语：发送帧 → 读应答 → 返回完整应答（数据在偏移 8）。真机已验证（GetPSD）。
-// receiveFeatureReport 本身阻塞到设备应答；sleep 只是给固件的处理留余量——真机日志
-// 显示多次交换在同一秒内完成，20ms 足够（旧值 80ms，一次完整下发 6 交换能省 ~0.4s）。
-export async function feat520Exchange(dev, cmd, sub, seq, dataLen, payload, log, rid = 6, flags = 0x01) {
-  const frame = P.buildFeat520Frame(rid, cmd, sub, seq, dataLen, payload, flags);
-  await dev.sendFeatureReport(rid, frame.slice(1));
-  log && log('tx', `F${rid} 520B [${rid.toString(16)} ${cmd.toString(16).padStart(2, '0')} ${sub.toString(16).padStart(2, '0')} 00 ${flags.toString(16).padStart(2, '0')} ${seq} ${dataLen.toString(16)} …]`);
-  await sleep(20);
-  const dv = await dev.receiveFeatureReport(rid);
+// 帧变体：LEOBOG 全系 fw24 = legacy（report 6、cmd@1、无校验）；银雕 K65 fw26 = k65
+// ——**帧布局与 legacy 完全相同**（真机实证 2026-10：legacy 格式 GetPSD 在 report 9 上
+// 成功返回 PSD，固件不校验、按 cmd@1 派发），唯一差异是 report id 固定 9。
+// （K65 驱动里另有 cmd@2+校验和的 exchanger 0x493360，但真机证明灯光/识别通道不走它——
+// 按 cmd@2 发帧时 byte[1] 的校验和被固件当命令码派发，读回全是无关内存。）
+// 由设备层按型号 fw 调 setFeat520Mode 切换。
+let feat520Mode = 'legacy'; // 'legacy' | 'k65'
+// 交换间隙：receiveFeatureReport 本身阻塞到设备应答（真机实测固件 ~3-12ms 内回），
+// 间隙只是给固件状态机的 SET→GET 准备余量——5ms 足够（旧值 20ms）
+const FEAT520_GAP_MS = 5;
+export function setFeat520Mode(m) {
+  if ((m === 'legacy' || m === 'k65') && m !== feat520Mode) {
+    feat520Mode = m;
+    // 型号切换（K65 ↔ LEOBOG）：写变体 / LED 表参数缓存随固件代次失效——
+    // 错配的缓存会让变体搜索直接失败而不是重搜
+    wiredWriteVariant = null;
+    wiredPaletteVariant = null;
+    wiredRgbTableParams = null;
+  }
+}
+export function getFeat520Mode() { return feat520Mode; }
+
+// 520B 通道的 report id：legacy 按接口声明探测（feat6 → feat9 → 回退 6）；
+// k65 固定 9（真机实测：F6 被 Chrome 拒发、F9 正常应答）。
+export function feat520Rid(dev) {
+  if (feat520Mode === 'k65') return 9;
+  if (hasFeatureReport(dev, 6)) return 6;
+  if (hasFeatureReport(dev, 9)) return 9;
+  return 6;
+}
+
+// 交换原语：发送帧 → 读应答 → 返回完整应答（数据在偏移 8，两代固件相同）。
+// LEOBOG 真机已验证；K65 = 同布局 + report 9（真机 GetPSD 验证 2026-10）。
+// rid 省略时按变体/接口能力选择。
+export async function feat520Exchange(dev, cmd, sub, seq, dataLen, payload, log, rid = null, flags = 0x01) {
+  const R = rid ?? feat520Rid(dev);
+  const frame = P.buildFeat520Frame(R, cmd, sub, seq, dataLen, payload, flags);
+  await dev.sendFeatureReport(R, frame.slice(1));
+  log && log('tx', `F${R} 520B[${feat520Mode}] [${R.toString(16)} ${cmd.toString(16).padStart(2, '0')} ${sub.toString(16).padStart(2, '0')} 00 ${flags.toString(16).padStart(2, '0')} ${seq} ${dataLen.toString(16)} …]`);
+  await sleep(FEAT520_GAP_MS);
+  const dv = await dev.receiveFeatureReport(R);
   const b = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
-  log && log('rx', `F${rid} ${P.hex(b.slice(0, 24))}${b.length > 24 ? ' …' : ''}`);
+  log && log('rx', `F${R} ${P.hex(b.slice(0, 24))}${b.length > 24 ? ' …' : ''}`);
   return b;
 }
 
@@ -938,7 +1074,9 @@ export async function feat520Exchange(dev, cmd, sub, seq, dataLen, payload, log,
 // 灯光配置在其它组合）。返回 { blob, cmd, sub, all }：blob 为灯光配置签名命中的数据，
 // all 为全部命中清单（供逆向映射）。0x13 配置签名：首字节 0e 且第 3/4 字节 03 03（效果/色彩模式）。
 export async function hidReadConfigWired(dev, log) {
-  const cmds = [0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x8a];
+  // 只读命令族：82(GetPSD) 在识别流程单独处理；89/8b-8f 为 K65 布局探查新增（K65 的 8a
+  // 不回数据——真机 2026-10，颜色表可能在别的命令上）
+  const cmds = [0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x8b, 0x8c, 0x8d, 0x8e, 0x8f];
   const all = [];
   let best = null;
   outer:
@@ -976,15 +1114,87 @@ export async function hidReadConfigWired(dev, log) {
 // ③wcmd 09 隧道帧被回显处理（灯闪）但不写本仓库（41 发前后逐字节一致）→ 显示固件默认红色。
 const WIRED_RGB_SLOTS = [21, 24]; // cmd 8a 表自定义色三元组（SetLedRgbTab 模板 +0x15 起两槽，真机绿校准）
 let wiredPaletteVariant = null; // 命中的写变体
+
+// LED RGB 表读取（含 K65 兜底）：K65 真机（2026-10）cmd 8a/0x200 只回 8B 帧头不回数据，
+// 0x190 才有数据。命中后缓存 {cmd, len}（会话级，型号切换时随 setFeat520Mode 清除），
+// 后续下发直接用缓存参数，省一轮试错交换。
+let wiredRgbTableParams = null;
+async function readRgbTable(dev, log) {
+  const seen = new Set();
+  const attempts = [];
+  const push = (cmd, sub, len) => {
+    const k = `${cmd}/${sub}/${len}`;
+    if (!seen.has(k)) { seen.add(k); attempts.push([cmd, sub, len]); }
+  };
+  if (wiredRgbTableParams) push(wiredRgbTableParams.cmd, 0, wiredRgbTableParams.len); // 缓存优先
+  if (feat520Mode === 'k65') push(0x8a, 0, 0x190); // K65 真机实证
+  push(0x8a, 0, 0x200); push(0x8a, 0, 0x190);
+  push(0x89, 0, 0x200); push(0x89, 0, 0x190);
+  push(0x88, 0, 0x200); push(0x86, 0, 0x200); push(0x87, 0, 0x200);
+  for (const [cmd, sub, len] of attempts) {
+    try {
+      const r = await feat520Exchange(dev, cmd, sub, 0, len, null, log);
+      if (r.length >= 32) { // 帧头 8B + 至少 24B 数据
+        wiredRgbTableParams = { cmd, len };
+        log && log('in', `[有线] LED 表：cmd ${cmd.toString(16)}/${sub} len ${len.toString(16)} → ${r.length}B`);
+        return { data: r.slice(P.FEAT520_DATA_OFF, P.FEAT520_DATA_OFF + len), cmd, len };
+      }
+      log && log('in', `[有线] cmd ${cmd.toString(16)}/${sub} len ${len.toString(16)} → 仅 ${r.length}B 帧头，无数据`);
+    } catch (e) { log && log('in', `[有线] cmd ${cmd.toString(16)} 读失败: ${e.message}`); }
+  }
+  return null;
+}
+
 // rgb=null → 默认彩虹表（无自定义色效果：花开富贵等读每键表，残留单色=单色频闪）
-export async function hidSetColorWired(dev, rgb, log, anim = false) {
+// opts.crc（K65 等 CRC=1 型号）：按官方流程**构造完整表直写**，不做读改写——
+//   K65 的 8a 表读回只有 144B 数据窗口，读改写会把 [21..143] 之外当全表，写回时
+//   [144..399] 全零 → 官方 RGB 表 = 19 效果 × 7 色槽 × 3B（效果 ui 组在 [21+21(ui-1)]），
+//   ui7+ 的组落在 [147..419] 被清零 → **自 ui5 之后的全部效果选色全灭**（2026-10-18
+//   真机定位）。官方（ApplySetting flag 0x40 → SetLedRgbTab）：[0..20] 头零 + [21..419]
+//   组色 + CRC=1 时补零到 512B 并写 5a a5@506/507，cmd 0x0A 单块直写。
+export async function hidSetColorWired(dev, rgb, log, anim = false, opts = {}) {
   const isDefault = !rgb;
-  log && log('in', `[有线] 写色${isDefault ? '（默认彩虹表）' : ` RGB(${rgb.join(',')})`}: 读 LED RGB 表（cmd 8a，512B）…`);
+  if (opts.crc) {
+    log && log('in', `[有线] 写色${isDefault ? '（默认彩虹表）' : ` RGB(${rgb.join(',')})`}: 官方全表直写（420B 组色 + 512B/CRC 尾标记）…`);
+    const tab = new Uint8Array(0x200); // [0..20] 头保持零（官方 memset 后仅从 21 起写）
+    for (let s = 21; s <= 419; s++) {
+      if (isDefault && anim) {
+        tab[s] = P.FLOWER_PATTERN[s - 21] ?? 0; // 真机捕获的官方花色模板（截到表域 399B）
+      } else if (isDefault) {
+        const k = Math.floor((s - 21) / 3);
+        tab[s] = P.hsvRgb(k * 360 / 133)[(s - 21) % 3];
+      } else {
+        tab[s] = rgb[(s - 21) % 3];
+      }
+    }
+    tab[506] = 0x5a; tab[507] = 0xa5; // CRC=1：512B + 尾标记（官方 ApplySetting 同款）
+    try {
+      await feat520Exchange(dev, 0x0a, 0x00, 0, 0x200, tab, log, null, 0x01);
+    } catch (e) {
+      log && log('er', `[有线] 全表直写失败: ${e.message}`);
+      return false;
+    }
+    // 读回校验只看 144B 窗口前段（K65 的 8a 读回上限，见上）
+    await sleep(20);
+    try {
+      const chk = await feat520Exchange(dev, 0x8a, 0, 0, 0x190, null, log);
+      if (chk.length >= 32) {
+        const now = chk.slice(P.FEAT520_DATA_OFF, P.FEAT520_DATA_OFF + 0x90);
+        let hit = 0, n = 0;
+        for (let s = 21; s < 0x90; s++) { n++; if (now[s] === tab[s]) hit++; }
+        log && log(hit === n ? 'ok' : 'warn', `[有线] 全表写入校验（144B 窗口）：${hit}/${n} 字节一致${hit === n ? ' ✓' : '——若灯异常请抓包反馈'}`);
+        return hit === n;
+      }
+    } catch (e) { log && log('warn', `[有线] 全表读回失败（${e.message}）——写入可能已生效`); }
+    return true;
+  }
+  log && log('in', `[有线] 写色${isDefault ? '（默认彩虹表）' : ` RGB(${rgb.join(',')})`}: 读 LED RGB 表…`);
   // Phase1：读 cmd 8a 表（布局：[0..15] 头 + [21..23]/[24..26] 自定义色 + … + [506..507]=5a a5）
-  const rd = await feat520Exchange(dev, 0x8a, 0, 0, 0x200, null, log);
-  if (rd.length < 24) { log && log('er', '[有线] 读 RGB 表失败'); return false; }
-  const orig = rd.slice(P.FEAT520_DATA_OFF, P.FEAT520_DATA_OFF + 0x200);
-  log && log('in', `[有线] 表头16=${P.hex(orig.subarray(0, 16))} 槽21=${P.hex(orig.subarray(21, 24))} 槽24=${P.hex(orig.subarray(24, 27))} 尾=${P.hex(orig.subarray(506, 508))}`);
+  const table = await readRgbTable(dev, log);
+  if (!table) log && log('warn', '[有线] LED 表读不到（K65 布局差异）——改为盲写，结果未验证');
+  const orig = table?.data ?? new Uint8Array(0x200);
+  const tblCmd = table?.cmd ?? 0x8a;
+  if (table) log && log('in', `[有线] 表头16=${P.hex(orig.subarray(0, 16))} 槽21=${P.hex(orig.subarray(21, 24))} 槽24=${P.hex(orig.subarray(24, 27))} 尾=${P.hex(orig.subarray(506, 508))}`);
   // Phase2：整片每键区 [21..505]（5a a5 尾@506 前）。早前只填 [21..293]（按 91 键误算），
   // 真机读表证实 [294..] 残留旧色——花开富贵等读全表。161 键色相渐变与无线同源。
   const tab = new Uint8Array(orig);
@@ -998,6 +1208,9 @@ export async function hidSetColorWired(dev, rgb, log, anim = false) {
   } else {
     for (let s = 21; s <= 505; s++) tab[s] = rgb[(s - 21) % 3];
   }
+  if (!table) { // 盲写模式：头 16B 与 5a a5 尾按 LEOBOG 惯例补上，其余由上方填色覆盖
+    tab[506] = 0x5a; tab[507] = 0xa5;
+  }
   const wantAt = (s) => {
     if (!isDefault) return [rgb[0], rgb[1], rgb[2]];
     if (anim) return [P.FLOWER_PATTERN[s - 21], P.FLOWER_PATTERN[s + 1 - 21], P.FLOWER_PATTERN[s + 2 - 21]];
@@ -1008,19 +1221,25 @@ export async function hidSetColorWired(dev, rgb, log, anim = false) {
     }
     return w;
   };
-  // Phase3：cmd 0a（bit-7 规则 8a→0a）变体写 + 8a 读回校验。
+  // Phase3：写表变体（LEOBOG = cmd 0a bit-7 规则；K65 真机读回通道不同，盲写时不校验）。
   // 同色切效果等场景表内容不变 → 跳过写入（省 2-4 次交换）
   let tabDiff = 0;
   for (let s = 21; s <= 505; s++) if (tab[s] !== orig[s]) tabDiff++;
-  const mkVariants = () => [
-    { label: 'cmd0a 单帧 d4/400/40', v: [0x0a, 0xd4, 0x400, 0x40] },
-    { label: 'cmd0a 单帧 00/200/01', v: [0x0a, 0x00, 0x200, 0x01] },
-    { label: 'cmd0a 单帧 d4/200/40', v: [0x0a, 0xd4, 0x200, 0x40] },
-    { label: 'cmd0a 分块 flags=1', v: [0x0a, 0x00, 0x200, 0x01, true] },
-    { label: 'cmd06 兜底 00/200/01', v: [0x06, 0x00, 0x200, 0x01] },
-  ];
+  const mkVariants = () => {
+    const list = [
+      { label: 'cmd0a 单帧 d4/400/40', v: [0x0a, 0xd4, 0x400, 0x40] },
+      { label: 'cmd0a 单帧 00/200/01', v: [0x0a, 0x00, 0x200, 0x01] },
+      { label: 'cmd0a 单帧 d4/200/40', v: [0x0a, 0xd4, 0x200, 0x40] },
+      { label: 'cmd0a 分块 flags=1', v: [0x0a, 0x00, 0x200, 0x01, true] },
+      { label: 'cmd09（SetLedRgbTab）00/200/01', v: [0x09, 0x00, 0x200, 0x01] },
+      { label: 'cmd06 兜底 00/200/01', v: [0x06, 0x00, 0x200, 0x01] },
+    ];
+    // 表已定位（如 K65 = 8a/190）：原长回写置于最前——与读侧同长，最贴近固件真实布局
+    if (table) list.unshift({ label: `cmd0a 原长回写 ${table.len.toString(16)}`, v: [0x0a, 0x00, table.len, 0x01] });
+    return list;
+  };
   if (!tabDiff) {
-    log && log('ok', '[有线] 每键表已是目标状态，跳过 8a 写入');
+    log && log('ok', '[有线] 每键表已是目标状态，跳过写入');
     // bank 段仍需保证一致（默认/自定义两模式都可能需要）
     await ensureWiredBanks(dev, isDefault, rgb, log);
     return true;
@@ -1033,11 +1252,12 @@ export async function hidSetColorWired(dev, rgb, log, anim = false) {
     payload.set(tab.subarray(0, Math.min(0x200, len)));
     log && log('in', `[有线] 写 RGB 表（${label}）…`);
     try {
-      await feat520Exchange(dev, cmd, sub, 0, len, payload, log, 6, flags);
+      await feat520Exchange(dev, cmd, sub, 0, len, payload, log, null, flags);
     } catch (e) { log && log('er', `[有线] 变体发送失败（${label}）: ${e.message}`); continue; }
-    await sleep(50);
-    const chk = await feat520Exchange(dev, 0x8a, 0, 0, 0x200, null, log);
-    if (chk.length >= 24) {
+    await sleep(20);
+    // 读回校验：表可读时按表命令读回比对；盲写（K65 布局差异）时跳过校验如实标注
+    const chk = table ? await feat520Exchange(dev, tblCmd, 0, 0, table.len, null, log) : null;
+    if (chk && chk.length >= 24) {
       const now = chk.slice(P.FEAT520_DATA_OFF, P.FEAT520_DATA_OFF + 0x200);
       const hit = WIRED_RGB_SLOTS.filter((s) => { const w = wantAt(s); return now[s] === w[0] && now[s + 1] === w[1] && now[s + 2] === w[2]; }).length;
       log && log('in', `[有线] ${label} → 槽命中 ${hit}/2（槽21=${P.hex(now.subarray(21, 24))} 槽24=${P.hex(now.subarray(24, 27))}）`);
@@ -1045,9 +1265,13 @@ export async function hidSetColorWired(dev, rgb, log, anim = false) {
         wiredPaletteVariant = variant;
         if (anim) { log && log('ok', '[有线] 动画模板表已写入（花开富贵；跳过 bank——官方对照 86 无变化）'); return true; }
         await ensureWiredBanks(dev, isDefault, rgb, log);
-        log && log('ok', `[有线] 写色完成（8a 表 + 86 bank-1${isDefault ? '，6 槽色相展开' : ''}）`);
+        log && log('ok', `[有线] 写色完成（${tblCmd.toString(16)} 表 + 86 bank-1${isDefault ? '，6 槽色相展开' : ''}）`);
         return true;
       }
+    }
+    if (!table && variant === variants[variants.length - 1]) {
+      log && log('warn', '[有线] 已盲写全部变体（读回通道不可用，无法校验）——请以键盘实际显示为准并反馈结果');
+      return true;
     }
   }
   log && log('er', '[有线] 调色板写变体均未生效——若灯异常请拔线重插恢复');
@@ -1069,8 +1293,8 @@ async function ensureWiredBanks(dev, isDefault, rgb, log) {
   if (same === 0x200) { log && log('ok', '[有线] bank 已是目标状态，跳过 86 写入'); return; }
   const pl2 = new Uint8Array(0x400);
   pl2.set(pal);
-  await feat520Exchange(dev, 0x06, 0xd4, 0, 0x400, pl2, log, 6, 0x40);
-  await sleep(50);
+  await feat520Exchange(dev, 0x06, 0xd4, 0, 0x400, pl2, log, null, 0x40);
+  await sleep(20);
   const chk2 = await feat520Exchange(dev, 0x86, 0, 0, 0x200, null, log);
   if (chk2.length >= 24) {
     const n2 = chk2.slice(P.FEAT520_DATA_OFF, P.FEAT520_DATA_OFF + 0x200);
@@ -1082,12 +1306,40 @@ async function ensureWiredBanks(dev, isDefault, rgb, log) {
 // 有线每键涂色（自定义模式）：读 8a 表 → 按矩阵号填 [21+3m] 三元组 → cmd 0a 写回。
 // ledMap 为空 = 清除涂色（每键区整片清零）。矩阵号 = 固件 LED 索引（KB.ini matrix 列，
 // 全型号最大 112 < 表容量）。使用已验证的写变体（d4/400/40），失败回退 00/200/01。
-export async function hidSetPerKeyWired(dev, ledMap, log) {
+// opts.crc（K65）：同 hidSetColorWired——8a 读回仅 144B，读改写会把 [144..399] 清零，
+//   改为构造完整 512B 表（涂色槽 + 其余零 + 5a a5 尾）官方式直写。
+export async function hidSetPerKeyWired(dev, ledMap, log, opts = {}) {
   const entries = Object.entries(ledMap);
   log && log('in', '[有线] 每键涂色：' + entries.length + ' 键' + (entries.length ? '' : '（清除整片）'));
-  const rd = await feat520Exchange(dev, 0x8a, 0, 0, 0x200, null, log);
-  if (rd.length < 24) { log && log('er', '[有线] 读 RGB 表失败'); return false; }
-  const tab = new Uint8Array(rd.slice(P.FEAT520_DATA_OFF, P.FEAT520_DATA_OFF + 0x200));
+  if (opts.crc) {
+    const tab = new Uint8Array(0x200);
+    for (const [m, rgb] of entries) {
+      const off = 21 + 3 * (+m);
+      if (off + 2 > 419) continue;
+      tab[off] = rgb[0]; tab[off + 1] = rgb[1]; tab[off + 2] = rgb[2];
+    }
+    tab[506] = 0x5a; tab[507] = 0xa5;
+    try {
+      await feat520Exchange(dev, 0x0a, 0x00, 0, 0x200, tab, log, null, 0x01);
+    } catch (e) { log && log('er', '[有线] 涂色全表直写失败: ' + e.message); return false; }
+    await sleep(20);
+    try {
+      const chk = await feat520Exchange(dev, 0x8a, 0, 0, 0x190, null, log);
+      if (chk.length >= 32) {
+        const now = chk.slice(P.FEAT520_DATA_OFF, P.FEAT520_DATA_OFF + 0x90);
+        const want = entries.filter(([m]) => 21 + 3 * (+m) + 2 < 0x90);
+        const hit = want.filter(([m, c]) => now[21 + 3 * m] === c[0] && now[22 + 3 * m] === c[1] && now[23 + 3 * m] === c[2]).length;
+        log && log(hit === want.length ? 'ok' : 'warn', `✓ [有线] 每键涂色已写入（144B 窗口 ${hit}/${want.length} 键命中；未保存，断电恢复）`);
+        return true;
+      }
+    } catch { /* 读回不可用则按已发送计 */ }
+    return true;
+  }
+  const table = await readRgbTable(dev, log);
+  if (!table) log && log('warn', '[有线] LED 表读不到——改为盲写，结果未验证');
+  const tblCmd = table?.cmd ?? 0x8a;
+  const tab = new Uint8Array(table?.data ?? new Uint8Array(0x200));
+  if (!table) tab[506] = 0x5a; tab[507] = 0xa5;
   const want = new Map();
   if (!entries.length) {
     for (let s2 = 21; s2 <= 505; s2++) tab[s2] = 0;
@@ -1102,11 +1354,11 @@ export async function hidSetPerKeyWired(dev, ledMap, log) {
   for (const [sub, len, flags] of [[0xd4, 0x400, 0x40], [0x00, 0x200, 0x01]]) {
     const payload = new Uint8Array(len);
     payload.set(tab.subarray(0, Math.min(0x200, len)));
-    try { await feat520Exchange(dev, 0x0a, sub, 0, len, payload, log, 6, flags); }
+    try { await feat520Exchange(dev, 0x0a, sub, 0, len, payload, log, null, flags); }
     catch (e) { log && log('er', '[有线] 涂色写发送失败: ' + e.message); continue; }
-    await sleep(50);
-    const chk = await feat520Exchange(dev, 0x8a, 0, 0, 0x200, null, log);
-    if (chk.length >= 24) {
+    await sleep(20);
+    const chk = table ? await feat520Exchange(dev, tblCmd, 0, 0, table.len, null, log) : null;
+    if (chk && chk.length >= 24) {
       const now = chk.slice(P.FEAT520_DATA_OFF, P.FEAT520_DATA_OFF + 0x200);
       const hit = entries.length
         ? [...want.entries()].filter(([m, c]) => now[21 + 3 * m] === c[0] && now[22 + 3 * m] === c[1] && now[23 + 3 * m] === c[2]).length
@@ -1115,6 +1367,10 @@ export async function hidSetPerKeyWired(dev, ledMap, log) {
       if (pass) { log && log('ok', '✓ [有线] 每键涂色已写入（' + (entries.length ? hit + '/' + want.size + ' 键命中' : '已清空') + '；未保存，断电恢复）'); return true; }
       log && log('in', '[有线] 变体不符（命中 ' + hit + '），尝试下一个…');
     }
+  }
+  if (!table) {
+    log && log('warn', '[有线] 已盲写涂色（读回通道不可用，无法校验）——请以键盘实际显示为准并反馈结果');
+    return true;
   }
   log && log('er', '[有线] 每键涂色写未生效——若灯异常请拔线重插恢复');
   return false;
@@ -1126,10 +1382,11 @@ export async function hidSetPerKeyWired(dev, ledMap, log) {
 // 全部失败则提示重插恢复。不落盘（保存命令未逆向），断电还原。
 let wiredWriteVariant = null; // 命中的写参数 [sub, len, flags]
 export async function hidApplyEffectWired(dev, effectByte, opts, log) {
-  // effectByte：UI 槽位号（1-19，真机校准）；0 = 关闭
+  // effectByte：UI 槽位号（1-19，真机校准）；0 = 关闭；null = 设置类补丁（不动效果字节）
+  // opts.forceColorMode：undefined=按颜色推导；显式传 null=不动色彩模式（设置类复用入口）
   const isOff = effectByte === 0;
-  const colorMode = (opts.colorful || opts.color) ? 0x01 : 0x03;
-  log && log('in', `[有线] 写效果 ui#${effectByte} 亮度=${opts.brightness} 速度=${opts.speed}${opts.colorful ? ' 炫彩' : opts.color ? ' RGB(' + opts.color.join(',') + ')' : ''}`);
+  const colorMode = 'forceColorMode' in opts ? opts.forceColorMode : ((opts.colorful || opts.color) ? 0x01 : 0x03);
+  log && log('in', `[有线] 写效果 ui#${effectByte ?? '(补丁)'} 亮度=${opts.brightness} 速度=${opts.speed}${opts.colorful ? ' 炫彩' : opts.color ? ' RGB(' + opts.color.join(',') + ')' : ''}`);
   // Phase1：读配置（84）
   log && log('in', '[有线] Phase1 读配置（cmd 84）…');
   const rd = await feat520Exchange(dev, 0x84, 0, 0, 0x190, null, log);
@@ -1139,27 +1396,41 @@ export async function hidApplyEffectWired(dev, effectByte, opts, log) {
   // Phase2：改配置（blob → 0x13 帧 → buildConfigWrite → blob）
   const frames = P.blobToFrames(orig);
   const wr = P.buildConfigWrite(frames, {
-    effect: isOff ? 0 : effectByte, // 有线=UI槽位号；效果槽表按同号索引
+    effect: isOff ? 0 : effectByte, // 效果字节 = UI 号（两代同域，真机逐效果验证）
     colorMode,
     brightness: isOff ? 0 : opts.brightness,
     speed: opts.speed,
     colorful: !!opts.colorful,
     colorRgb: isOff ? null : (opts.colorful ? null : opts.color), // 自定义色 → 第9片 idx3-5
-    clearColor: !isOff && !(opts.colorful || opts.color), // 无色效果清帧9残留色（花开富贵频闪根因之一）
-    animMode: !!opts.anim, // 动画族效果（花开富贵）：blob[3]=02 表驱动渲染
+    clearColor: effectByte != null && !isOff && !(opts.colorful || opts.color), // 无色效果清帧9残留色（设置类补丁 effectByte=null 不清）
+    animMode: !!opts.anim, // 动画族效果（花开富贵）：blob[3]=02 表驱动渲染（仅 fw24）
+    gen: opts.gen,
+    lightHw: opts.lightHw,
   });
   const blob = P.framesToBlob(wr);
   // 写入内容与当前配置无差异：改的只是颜色（调色板域，有线写侧未实现）——提示并跳过写入
+  // K65（fw26）配置有效域 = 128B（GetLED 同长读回并校验 5A A5@126/127；帧尾自定义色
+  // blob[128..130] 属 fw24 十片尾巴，越界字节读回不确定）——差异与校验都限定 128B；
+  // fw24 仍按 140B 全域（含第9片自定义色 blob[128..130] = 帧9字节7-9）。
+  const cmpLen = feat520Mode === 'k65' ? 128 : 140;
   let diff = 0;
-  for (let i = 0; i < 140; i++) if (blob[i] !== orig[i]) diff++; // 140 含第9片自定义色（blob[128..130] = 帧9字节7-9 = payload idx3-5）
+  for (let i = 0; i < cmpLen; i++) if (blob[i] !== orig[i]) diff++;
   if (!diff) {
     log && log('in', '[有线] 配置无变化（颜色走调色板仓库，由后续写色步骤处理）');
     return false;
   }
-  // Phase3：写变体搜索。已知：sub0/len190/flags01 会清零（真机）。驱动反汇编：D4/400/40。
+  // Phase3：写变体搜索。已知危险组合 (sub=00, len=190, flags=01) 会清零配置（LEOBOG 真机
+  // 实证）——legacy 列表永不包含它；k65 列表中它仅在最后尝试（K65 只有读侧 0x190 的实证，
+  // 写侧未证；LEOBOG 上它的行为是清零，放最前等于优先踩坑）。
+  // K65 正统写法置首（2026-10 驱动反汇编实证）：CDevG5KB::SetLED = AccessData(cmd=04, sub=0,
+  // len=0x80)——配置有效域只有 128B（GetLED 同长读回并校验 5A A5@126/127），变体搜索应最先
+  // 命中它，不再依赖 d4/400/40 这类猜参。
   const variants = wiredWriteVariant
     ? [wiredWriteVariant]
-    : [[0xd4, 0x400, 0x40], [0xd4, 0x190, 0x40], [0x00, 0x400, 0x40], [0xd4, 0x190, 0x01], [0x01, 0x190, 0x01]];
+    : (feat520Mode === 'k65'
+      // K65：正统 00/80/01 优先；D4/400/40（驱动反汇编同款）与其后为历史兜底（危险降序，见上）
+      ? [[0x00, 0x80, 0x01], [0xd4, 0x400, 0x40], [0xd4, 0x190, 0x40], [0x00, 0x400, 0x40], [0xd4, 0x190, 0x01], [0x01, 0x190, 0x01], [0x00, 0x190, 0x01]]
+      : [[0xd4, 0x400, 0x40], [0xd4, 0x190, 0x40], [0x00, 0x400, 0x40], [0xd4, 0x190, 0x01], [0x01, 0x190, 0x01]]);
   for (const [sub, len, flags] of variants) {
     // 数据按 len 补零到对应长度（写帧数据区从偏移 8 起，≤512 单块；0x400 超出单块——先按整块试）
     const payload = new Uint8Array(len);
@@ -1175,25 +1446,25 @@ export async function hidApplyEffectWired(dev, effectByte, opts, log) {
     }
     log && log('in', `[有线] Phase3 写配置（cmd 04 sub=${sub.toString(16)} len=${len.toString(16)} flags=${flags.toString(16)}，效果字节=${blob[10]} 原 ${orig[10]}）…`);
     try {
-      await feat520Exchange(dev, 0x04, sub, 0, len, payload, log, 6, flags);
+      await feat520Exchange(dev, 0x04, sub, 0, len, payload, log, null, flags);
     } catch (e) {
       log && log('er', `[有线] 该变体发送失败: ${e.message}`);
       continue;
     }
     // 读回校验（已知域前 16 字节即可判定写入是否生效）
-    await sleep(50);
+    await sleep(20);
     const chk = await feat520Exchange(dev, 0x84, 0, 0, 0x190, null, log); // 校验读必须 seq=0（真机：seq≠0 返回假零）
     if (chk.length >= 24) {
       const now = chk.slice(P.FEAT520_DATA_OFF, P.FEAT520_DATA_OFF + 0x190);
       let same = 0;
-      for (let i = 0; i < 140; i++) if (now[i] === blob[i]) same++;
-      if (same >= 138) { // 允许个别字节由固件自行修正
+      for (let i = 0; i < cmpLen; i++) if (now[i] === blob[i]) same++;
+      if (same >= cmpLen - 2) { // 允许个别字节由固件自行修正
         wiredWriteVariant = [sub, len, flags];
-        log && log('ok', `[有线] 配置已生效（${same}/140 一致；变体已缓存；未保存，断电恢复）`);
+        log && log('ok', `[有线] 配置已生效（${same}/${cmpLen} 一致；变体已缓存；未保存，断电恢复）`);
         log && log('in', `[有线] 读回帧9区 blob[126..139] = ${P.hex(now.slice(126, 140))}（写入期望色 ${P.hex(blob.slice(128, 131))}，读回色 ${P.hex(now.slice(128, 131))}）`);
         return true;
       }
-      log && log('in', `[有线] 变体不符（${same}/128），尝试下一个…`);
+      log && log('in', `[有线] 变体不符（${same}/${cmpLen}），尝试下一个…`);
     }
   }
   log && log('er', '[有线] 所有写变体均未生效——请拔线重插键盘恢复配置，并把日志反馈');

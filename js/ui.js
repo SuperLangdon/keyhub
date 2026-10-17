@@ -29,11 +29,33 @@ export function toast(msg, err = false) {
   toastTimer = setTimeout(() => el.classList.add('hidden'), 2200);
 }
 
+// 弹层可访问性：role/aria-modal、Esc 关闭、打开时把焦点移入弹层、关闭时还原焦点。
+// 返回卸载函数（弹层移除前调用）。onClose 在按 Esc 时触发（语义上等于取消/关闭）。
+export function modalA11y(mask, onClose) {
+  mask.setAttribute('role', 'dialog');
+  mask.setAttribute('aria-modal', 'true');
+  const prev = document.activeElement;
+  const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); onClose?.(); } };
+  mask.addEventListener('keydown', onKey);
+  setTimeout(() => {
+    // 优先聚焦首个输入控件（prompt 场景），否则聚焦弹层卡片本身
+    const box = mask.querySelector('.modal');
+    const target = mask.querySelector('input, select, textarea') || box;
+    if (target) { target.tabIndex = target === box ? -1 : target.tabIndex; target.focus({ preventScroll: true }); }
+  });
+  return () => {
+    mask.removeEventListener('keydown', onKey);
+    if (prev && prev.focus && document.contains(prev)) prev.focus({ preventScroll: true });
+  };
+}
+
 // 确认弹层
 export function confirmBox(title, msg) {
   return new Promise((resolve) => {
     const mask = h('div', { class: 'modal-mask' });
-    const close = (v) => { mask.remove(); resolve(v); };
+    let unA11y = () => {};
+    const close = (v) => { unA11y(); mask.remove(); resolve(v); };
+    unA11y = modalA11y(mask, () => close(false));
     mask.append(h('div', { class: 'modal' },
       h('h4', { text: title }),
       h('div', { text: msg }),
@@ -52,7 +74,9 @@ export function promptBox(title, value = '') {
   return new Promise((resolve) => {
     const mask = h('div', { class: 'modal-mask' });
     const inp = h('input', { class: 'inp', value, style: 'width:100%' });
-    const close = (v) => { mask.remove(); resolve(v); };
+    let unA11y = () => {};
+    const close = (v) => { unA11y(); mask.remove(); resolve(v); };
+    unA11y = modalA11y(mask, () => close(null));
     mask.append(h('div', { class: 'modal' },
       h('h4', { text: title }),
       inp,

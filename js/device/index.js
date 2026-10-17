@@ -1,9 +1,10 @@
 // 设备管理：模拟器 / WebHID 真机的统一接口
 import * as P from './protocol.js';
 import * as H from './webhid.js';
+import * as F from './film.js';
 import * as i18n from '../i18n.js';
-import { state, emit } from '../store.js';
-import { COMMON_CMDS } from '../vk.js';
+import { state, emit, BUILD } from '../store.js';
+import { download } from '../ui.js';
 
 // ---------- 调试日志 ----------
 // kind 六级：tx 发送 / rx 接收 / in 过程信息 / ok 成功 / warn 警告 / er 失败。
@@ -22,6 +23,17 @@ export function devLog(kind, msg) {
 export function onDevLog(fn) { logListeners.add(fn); }
 export function getLogs() { return [...logBuf]; }
 export function clearLogs() { logBuf.length = 0; logListeners.forEach((fn) => fn(null)); }
+
+// ---------- HID 事务互斥 ----------
+// 所有设备收发串行化：下发 / 探针 / 调试台手动发送并发时，各自的 inputreport
+// 监听会互相抢帧（校验误判、配置读半截）。公开入口一律 lock() 排队；方法内部的
+// 嵌套调用走 *Inner（不再排队，避免自锁）。
+let txChain = Promise.resolve();
+function lock(fn) {
+  const p = txChain.then(fn);
+  txChain = p.then(() => {}, () => {});
+  return p;
+}
 
 // ---------- 效果槽 → 固件号 ----------
 // 花开富贵的 UI 槽位（各型号 LedOpt 第 17 行均未掩藏）。是否走表驱动动画路径
@@ -45,7 +57,7 @@ export function isOffUi(model, ui) {
   return !o || o.fw === 0;
 }
 
-// ---------- 设备接口 ----------
+  // ---------- 设备接口 ----------
 export function hidReady() {
   return H.hidAvailable();
 }
@@ -54,6 +66,14 @@ export const device = {
   mode: 'sim',
   dev: null,
   hidDevs: [],
+
+  // 型号协议配置：K65（fw≠24）的 520B 有线通道固定走 report 9（帧布局与 LEOBOG 相同，
+  // 真机实证 2026-10），LEOBOG 全系 fw24 走 report 6。进入型号会话时调用（enterApp）。
+  configureModel(model) {
+    const mode = model?.fw === 24 ? 'legacy' : 'k65';
+    H.setFeat520Mode(mode);
+    devLog('in', `520B 通道：${mode}（${model?.short ?? '?'} fw=${model?.fw ?? '?'}）——K65 = 同布局 + report 9`);
+  },
 
   get label() {
     return this.mode === 'hid'
@@ -74,15 +94,22 @@ export const device = {
     this.dev = dev;
     this.hidDevs = [dev, ...rest.filter((d) => d !== dev)];
     this.mode = 'hid';
-    dev.addEventListener('disconnect', () => this.disconnect());
+    // 防重复挂监听：同一设备多次 attach（卡片重进）不能叠加 disconnect 处理器
+    if (!dev.__khDiscWired) {
+      dev.__khDiscWired = true;
+      dev.addEventListener('disconnect', () => this.disconnect());
+    }
     devLog('in', `真机模式已启用（${dev.productName || 'Keyboard'}，${this.hidDevs.length} 个接口）`);
     emit('device', this.mode);
   },
 
-  // 通道判别：按 VID/PID 区分有线 / 2.4G 无线（「自动」连接后由此识别实际通道）
+  // 通道判别：按 VID/PID 区分有线 / 2.4G 无线（「自动」连接后由此识别实际通道）。
+  // 多设备族（LEOBOG 全系 / 银雕 K65）逐族匹配，见 protocol.js DEVICE_FAMILIES。
   channelOf(dev) {
-    if (dev?.vendorId === P.WIRED.vid && dev?.productId === P.WIRED.pid) return 'wired';
-    if (dev?.vendorId === P.WIRELESS.vid && dev?.productId === P.WIRELESS.pid) return 'wireless';
+    for (const fam of P.DEVICE_FAMILIES) {
+      if (dev?.vendorId === fam.wired?.vid && dev?.productId === fam.wired?.pid) return 'wired';
+      if (dev?.vendorId === fam.wireless?.vid && dev?.productId === fam.wireless?.pid) return 'wireless';
+    }
     return null;
   },
 
@@ -97,10 +124,7 @@ export const device = {
       if (interactive) devLog('er', '固件版本查询需要 WebUSB（Chrome/Edge + localhost/HTTPS）');
       return null;
     }
-    const filters = [
-      { vendorId: P.WIRED.vid, productId: P.WIRED.pid },
-      { vendorId: P.WIRELESS.vid, productId: P.WIRELESS.pid },
-    ];
+    const filters = P.idsForChannel('any').map(({ vid, pid }) => ({ vendorId: vid, productId: pid }));
     try {
       let dev = (await navigator.usb.getDevices())
         .find((d) => filters.some((f) => d.vendorId === f.vendorId && d.productId === f.productId));
@@ -124,11 +148,29 @@ export const device = {
     }
   },
 
-  // 电量（无线 only，0x4A）：返回 {percent, flags}；未连接 / 有线 / 休眠无响应返回 null
+  // 电量：按型号代际选择通道（2026-10 K65 版驱动 REA）：
+  //   fw26（K65）→ GetPower（feat520 校验和帧 cmd 09/01，应答数据@8；仅 k65 帧模式），
+  //                有线/无线连接都走同一 feat520 接口（官方驱动仅在无线连接时查询，有线恒显 100%）
+  //   fw24（LEOBOG）→ 0x13 cmd 0x4A（仅 2.4G 接收器通道应答；注意 0x4A 在 fw26 语义是板载档号）
+  // 返回 {percent}；未连接 / 无响应 / 休眠返回 null
   async readBattery() {
+    return lock(async () => {
     if (this.mode !== 'hid' || !this.dev?.opened) return null;
+    const { model } = state;
+    // GetPower（fw26）只发给 VID/PID 与该型号匹配的设备——连接向导的电量角标可能在
+    // 型号会话之外触发，state.model 未必对应眼前这台键盘
+    const matchesModel = model && [[model.vid, model.pid], [model.vidW, model.pidW]]
+      .some(([v, p]) => v != null && this.dev?.vendorId === v && this.dev?.productId === p);
+    if (model && P.cfgGenOf(model) === 'fw26' && matchesModel) {
+      // GetPower 需要 feat520（report 6/9 任一）；主接口没有则试其它已授权接口
+      const dev = [this.dev, ...(this.hidDevs ?? [])].find((d) => d?.opened && (H.hasFeatureReport(d, 6) || H.hasFeatureReport(d, 9)));
+      if (dev) { try { return await H.hidReadBatteryWired(dev, devLog); } catch (e) { devLog('er', '电量(GetPower): ' + e.message); return null; } }
+      devLog('er', '电量(GetPower)：已授权接口无 520B feature 通道（report 6/9）');
+      return null;
+    }
     if (this.channelOf(this.dev) !== 'wireless') return null;
     try { return await H.hidReadBattery(this.dev, devLog); } catch { return null; }
+    });
   },
 
   // 型号识别（GetPSD，report ID 0x05），单个接口。返回 { psd, reason }，见 webhid.js readPsd。
@@ -143,9 +185,12 @@ export const device = {
   // （识别通道不在已授权接口上，或所在接口被浏览器屏蔽）。
   // 返回 { psd, dev, reason, blob }：blob 为 3632 路径带回的应答块（psd 为空时上层滑窗匹配）。
   async readPsdAny(devs) {
+    return lock(() => this.readPsdAnyInner(devs));
+  },
+  async readPsdAnyInner(devs) {
     const list = (devs && devs.length ? devs : this.hidDevs ?? [this.dev]).filter((d) => d?.opened);
-    // 排序 = readPsd 的路径优先级：out[13]（0x13 协议，接收器）> feat[6]（520B 帧，有线）> feat[5]
-    const rank = (d) => H.hasOutputReport(d, P.REPORT_ID) ? 3 : H.hasFeatureReport(d, 6) ? 2 : H.hasFeatureReport(d, P.PSD_REPORT_ID) ? 1 : 0;
+    // 排序 = readPsd 的路径优先级：out[13]（0x13 协议，接收器）> feat[6/9]（520B 帧，有线）> feat[5]
+    const rank = (d) => H.hasOutputReport(d, P.REPORT_ID) ? 3 : (H.hasFeatureReport(d, 6) || H.hasFeatureReport(d, 9)) ? 2 : H.hasFeatureReport(d, P.PSD_REPORT_ID) ? 1 : 0;
     const sorted = [...list].sort((a, b) => rank(b) - rank(a));
     let lastReason = sorted.length ? 'timeout' : 'no-dev';
     for (const d of sorted) {
@@ -185,8 +230,7 @@ export const device = {
     if (!H.hidAvailable()) return [];
     try {
       const devs = await navigator.hid.getDevices();
-      return devs.filter((d) =>
-        [P.WIRED, P.WIRELESS].some(({ vid, pid }) => d.vendorId === vid && d.productId === pid));
+    return devs.filter((d) => P.idsForChannel('any').some(({ vid, pid }) => d.vendorId === vid && d.productId === pid));
     } catch { return []; }
   },
 
@@ -217,10 +261,15 @@ export const device = {
   // 有线读回的 blob 与无线 0x44 十片逐字节同构；有线以 SW 写入已被真机确认各效果正确；
   // 早先「无线用 hw 次列」的判断源于休眠键盘 + LedMask 隐藏效果的污染数据，已废弃）。
   async applyLight(cfg, model) {
-    const fw = fwOfUi(model, cfg.effectUi); // hw 次列：仅供 per-key 自定义固件号等使用
+    return lock(() => this.applyLightInner(cfg, model));
+  },
+  async applyLightInner(cfg, model) {
     const isCustom = cfg.effectUi === 19;   // FX_CUSTOM_UI（注入的自定义槽）
     const isOff = cfg.effectUi === 21;      // 原生 LedOpt19 行（首列 21/fw 0），UI 呈现为关闭
-    const sw = isOff ? 0 : isCustom ? 21 : cfg.effectUi; // SW 效果字节
+    // 效果字节 = UI 号（两代同域）。§11.5 曾改为 fw 固件号——系 LedOpt 行布局偏移读错
+    //（行实为 [使能,fw,ui,...]，驱动 FillCfgB 取行+2=ui 列）；真机大规模错乱后回滚，
+    // 并由真机现象反证固件效果域确为 UI 1-18（LedMask 隐藏的 6/14/18 固件没有）+21+0。
+    const sw = isOff ? 0 : isCustom ? 21 : cfg.effectUi;
     const opts = {
       // 颜色按效果能力过滤：花开富贵等无色效果（LedOpt color=0）只隐藏了控件，
       // cfg.color 仍残留上次选色——带着它下发会灌单色表 → 单色频闪（真机复现）。
@@ -230,10 +279,9 @@ export const device = {
       anim: cfg.effectUi === ANIM_EFFECT_UI && !!(model.animations && model.animations['cartoon/flower']), // 花开富贵：仅动画代固件（有 cartoon/flower 定义文件：Hi98/Hi98 3-Mode/Hi86）走表驱动三件套；其他代际固件原生渲染，走普通路径
       brightness: cfg.brightness,
       speed: cfg.speed,
+      gen: P.cfgGenOf(model),           // fw24（LEOBOG 历史布局）/ fw26（K65 版驱动 FillCfg 实证布局）
+      lightHw: P.modelLightHw(model),   // K65 = [1,5,10,15,20]（直写 UI 档会近乎最暗）；LEOBOG 恒等 → null
     };
-    if (this._applying) return; // 防重入：上一次下发进行中（快速连点会导致应答串线）
-    this._applying = true;
-    try {
     if (this.mode === 'hid' && this.dev?.opened) {
       if (!this.canSend13()) {
         // 有线键盘：无 0x13 输出通道。效果/亮度/速度走 520B 配置帧（cmd 84/04）；
@@ -242,21 +290,22 @@ export const device = {
           await H.hidApplyEffectWired(this.dev, sw, opts, devLog);
           if (!isOff) {
             // 自定义色=灌色；无自定义色（炫彩/无色效果）=默认彩虹表——
-            // 花开富贵等读每键表，残留单色=单色频闪（真机复现）
+            // 花开富贵等读每键表，残留单色=单色频闪（真机复现）。
+            // crc 型号（K65）按官方流程全表直写（8a 读回仅 144B，读改写会清零 ui7+ 的组）
             const rgb = (!opts.colorful && opts.color) ? opts.color : null;
-            await H.hidSetColorWired(this.dev, rgb, devLog, !!opts.anim);
+            await H.hidSetColorWired(this.dev, rgb, devLog, !!opts.anim, { crc: !!model.crc });
           }
         }
         catch (e) { devLog('er', '有线下发失败: ' + e.message); }
         if (isCustom && Object.keys(cfg.perKey || {}).length) {
-          await this.applyPerKey(cfg.perKey || {}, model, cfg); // 自定义模式：主下发连带每键/动画图案
+          await this.applyPerKeyInner(cfg.perKey || {}, model, cfg); // 自定义模式：主下发连带每键/动画图案
         }
         return;
       }
       try { await H.hidApplyEffect(this.dev, sw, opts, devLog); }
       catch (e) { devLog('er', '下发失败: ' + e.message); }
       if (isCustom && Object.keys(cfg.perKey || {}).length) {
-        await this.applyPerKey(cfg.perKey || {}, model, cfg); // 自定义模式：主下发连带每键/动画图案
+        await this.applyPerKeyInner(cfg.perKey || {}, model, cfg); // 自定义模式：主下发连带每键/动画图案
       }
     } else {
       devLog('in', `[模拟] 下发效果 ui#${cfg.effectUi}(SW#${sw}) 亮度=${opts.brightness} 速度=${opts.speed}${opts.colorful ? ' 炫彩' : ' RGB(' + opts.color.join(',') + ')'}`);
@@ -267,13 +316,15 @@ export const device = {
       devLog('tx', `config×10 首片: ${P.hex(frames[0])}`);
       devLog('tx', `palette×37 perkey×28 save×1（可在真机模式下查看全部报文）`);
     }
-    } finally { this._applying = false; }
   },
 
-  async applyPerKey(perKey, model, cfg = {}) {
-    // perKey: {keyId: [r,g,b]} → led 索引 = 矩阵号。
-    // 动画编译：选中动画（自定义模式）时先铺动画图案（行色锚点间线性插值，
-    // 无锚点按行号色相渐变——原驱动同款语义），手涂颜色叠加其上覆盖
+  async applyPerKey(perKey, model, cfg = {}, ui = {}) {
+    return lock(() => this.applyPerKeyInner(perKey, model, cfg, ui));
+  },
+  // perKey: {keyId: [r,g,b]} → led 索引 = 矩阵号。
+  // 动画编译：选中动画（自定义模式）时先铺动画图案（行色锚点间线性插值，
+  // 无锚点按行号色相渐变——原驱动同款语义），手涂颜色叠加其上覆盖
+  async applyPerKeyInner(perKey, model, cfg = {}) {
     const merged = perKey; // 原版驱动的自定义模式无动画——只有调色盘+涂色
     const ledMap = {};
     for (const [id, rgb] of Object.entries(merged)) {
@@ -288,13 +339,14 @@ export const device = {
           await H.hidApplyEffectWired(this.dev, 21, {
             brightness: cfg.brightness ?? 3, speed: cfg.speed ?? 2,
             forceColorMode: 0x01,
+            gen: P.cfgGenOf(model), lightHw: P.modelLightHw(model),
           }, devLog);
-          await H.hidSetPerKeyWired(this.dev, ledMap, devLog);
+          await H.hidSetPerKeyWired(this.dev, ledMap, devLog, { crc: !!model.crc });
         }
         catch (e) { devLog('er', '有线下发失败: ' + e.message); }
         return;
       }
-      try { await H.hidApplyPerKey(this.dev, ledMap, selfFw, devLog); }
+      try { await H.hidApplyPerKey(this.dev, ledMap, selfFw, devLog, model); }
       catch (e) { devLog('er', '下发失败: ' + e.message); }
     } else {
       devLog('in', `[模拟] 下发每键 RGB ${Object.keys(ledMap).length} 键（自定义模式 fw#${selfFw}）`);
@@ -302,34 +354,40 @@ export const device = {
     }
   },
 
-  // 下发宏（内容 + 各层宏键/常用命令键指派）。逆向自原驱动 CDev3632（SetMacro cmd 0x03 /
+  // 下发改键与宏（全功能指派 + 宏内容）。逆向自原驱动 CDev3632（SetMacro cmd 0x03 /
   // SetMatrix cmd 0x01）；回放由键盘固件执行，关掉网页不影响使用。
-  // cfg.layers 里的宏键（type 0x0A）与常用命令键（type 0x01，如锁屏）都会收集；
-  // 键位层走读改写——只替换这两类键，其余功能类型的全量编码未逆向、不动。
+  // cfg.layers 里的全部功能类型都参与读改写：普通键/组合键（fnToDword hid 编码）、多媒体/灯光
+  // （type 0x09 字节重排）、宏（type 0x0A）、常用命令（type 0x01 查表）——编码规则全部实证自
+  // keyinfo_to_hardware_code@0x491f90（2026-10 REA 复核）。无编码的指派跳过并计数。
+  // 键位槽位用 model.keys[].matrix（驱动按 KB.ini 每键 matrix 寻址，BuildMacroBlob 实证；
+  // K 序号≠槽位——Hi75 K1→槽0、K2→槽12，此前按 K 序号直索引是错位 bug，2026-10 修正）。
   async applyMacros() {
+    return lock(() => this.applyMacrosInner());
+  },
+  async applyMacrosInner() {
     const { model, cfg } = state;
     const macros = state.macros;
     if (!model || !cfg) return { error: 'no-model' };
-    // 收集各层指派：宏 {layer: {keyIndex: {macroId, repeat, loopCode}}}；命令 {layer: {keyIndex: hwDword}}
-    const byLayer = {};
-    const cmdByLayer = {};
-    const skippedCmds = [];
+    if (!model.keys?.length) { devLog('er', '未加载型号（键位槽未知），无法下发改键'); return { error: 'no-model' }; }
+    // 键 → 固件矩阵槽位；槽数 = max(matrix)+1（Hi75 为 90 槽 > 键数 82——旋钮等占位）
+    const slotOf = new Map(model.keys.map((k) => [k.i, k.matrix]));
+    const slotCount = Math.max(...model.keys.map((k) => k.matrix)) + 1;
+    const patchByLayer = {};
+    const skipped = [];
     let any = false;
     for (let l = 0; l < (model.layerNum ?? 4); l++) {
-      const m = {};
-      const c = {};
+      const p = {};
       for (const [kIdx, fn] of Object.entries(cfg.layers?.[l] ?? {})) {
-        if (fn?.type === 0x0A) {
-          m[kIdx] = { macroId: fn.param, repeat: fn.rep ?? 1, loopCode: fn.loopCode ?? P.MACRO_LOOP_CODES.once };
-          any = true;
-        } else if (fn?.type === 0x01) {
-          const def = COMMON_CMDS.find((x) => x.code === fn.code);
-          if (def?.hw != null) { c[kIdx] = def.hw; any = true; }
-          else if (def) skippedCmds.push(`K${kIdx} 0x${fn.code.toString(16)}`);
-        }
+        const slot = slotOf.get(+kIdx);
+        if (slot == null) continue;
+        const dw = P.fnToDword(fn, { macroOrder: macros });
+        if (dw != null) { p[slot] = dw; any = true; }
+        else if (fn?.type === 0x0A) skipped.push(`K${kIdx} 宏不存在`);
+        else if (fn?.type === 0x01 && fn.code === 0x1d) skipped.push(`K${kIdx} 复位键盘`);
+        else if (fn?.type === 0x02 && fn.code >= 6 && fn.code <= 9) skipped.push(`K${kIdx} 鼠标动作值域未校准`);
+        else skipped.push(`K${kIdx} 无固件编码`);
       }
-      if (Object.keys(m).length) byLayer[l] = m;
-      if (Object.keys(c).length) cmdByLayer[l] = c;
+      if (Object.keys(p).length) patchByLayer[l] = p;
     }
     if (this.mode === 'hid' && this.dev?.opened) {
       if (!this.canSend13() && !H.hasFeatureReport(this.dev, 6) && !H.hasFeatureReport(this.dev, 9)) {
@@ -337,74 +395,160 @@ export const device = {
         return { error: 'no-channel' };
       }
       if (!macros.length && !any) {
-        devLog('in', skippedCmds.length
-          ? `仅有无固件编码的指派（${skippedCmds.join('、')}＝复位键盘：原驱动中为主机侧全局操作，非固件键位功能），无内容可写入`
-          : '没有宏/命令指派，无事可做');
+        devLog('in', '没有可下发的指派，无事可做');
         return { sent: false };
       }
-      if (this._applying) return { error: 'busy' };
-      // 容量拦截（原驱动同款）：打包 blob 超驱动硬上限 0x2800 直接拒绝，别让固件截断
+      // 容量拦截（原驱动同款，双层上限）：打包 blob 超 KB.ini MacroBufferSize（K65 缺省 4096，
+      // 驱动打包器实际生效的上限）或驱动静态数组硬上限 0x2800 直接拒绝，别让固件截断
       if (macros.length) {
+        const cap = Math.min(model.macroBufferSize ?? H.MACRO_DRIVER_LIMIT, H.MACRO_DRIVER_LIMIT);
         const { blob } = P.buildMacroBlob(macros);
-        if (blob.length > H.MACRO_DRIVER_LIMIT) {
-          devLog('er', `宏打包 ${blob.length}B 超过原驱动上限 ${H.MACRO_DRIVER_LIMIT}B（10240）——请删减宏/事件后重试`);
+        if (blob.length > cap) {
+          devLog('er', `宏打包 ${blob.length}B 超过原驱动上限 ${cap}B——请删减宏/事件后重试`);
           return { error: 'too-big', size: blob.length };
         }
-        devLog('in', `容量检查：打包 ${blob.length}B ≤ ${H.MACRO_DRIVER_LIMIT}B ✓`);
+        devLog('in', `容量检查：打包 ${blob.length}B ≤ ${cap}B ✓`);
       }
-      this._applying = true;
+      if (skipped.length) devLog('in', `[提示] 跳过 ${skipped.length} 项无固件编码/待校准的指派：${skipped.join('、')}`);
+      // K65 等按 MatrixLen 全层下发 + 末槽 A5A5A5A5（驱动 FillMatrix 0x490D10 实证）；
+      // fw24 世代维持 max(matrix)+1 槽（真机验证过的行为）
+      const mOpts = model.crc
+        ? { matrixLen: model.matrixLen ?? P.MATRIX_DEFAULT_LEN, crc: true }
+        : {};
+      if (mOpts.matrixLen) devLog('in', `键位层域：MatrixLen=${mOpts.matrixLen} 槽（CRC 型号全层下发，末槽 A5A5A5A5）`);
       try {
-        if (skippedCmds.length) devLog('in', `[提示] ${skippedCmds.join('、')} 指派的「复位键盘」无固件键位编码（原驱动仅作为全局设置操作），已跳过写入`);
+        let res;
         if (this.canSend13()) {
           // 2.4G 无线通道：0x13 协议（宏内容 cmd 0x03 + 键位 0x41/0x01）
-          return await H.hidApplyMacros(this.dev, macros, byLayer, model.keys.length, devLog, cmdByLayer);
+          res = await H.hidApplyMacros(this.dev, macros, patchByLayer, slotCount, devLog, mOpts);
+        } else {
+          // 有线通道：520B 特征帧（键位读 cmd 83 / 写 cmd 03，宏写 cmd 05——逆向自 CDevG5KB）
+          res = await H.hidApplyMacrosWired(this.dev, macros, patchByLayer, slotCount, devLog, mOpts);
         }
-        // 有线通道：520B 特征帧（键位读 cmd 83 / 写 cmd 03，宏写 cmd 05——逆向自 CDevG5KB）
-        return await H.hidApplyMacrosWired(this.dev, macros, byLayer, cmdByLayer, model.keys.length, devLog);
+        // 旋钮模式联动（型号过滤：KB.ini WheelMode>0 才有；驱动 FillCfg Cfg[26]=nWheelMode——
+        // 旋钮键被改键→6=固件当普通键，否则 0。KnobIndex 为 0 基，K 表 1 基 +1）
+        const wheel = model.wheel;
+        if (wheel?.mode > 0 && Number.isInteger(wheel.knobIndex) && this.canSend13()) {
+          const knobI = wheel.knobIndex + 1;
+          const defFn = model.keys.find((k) => k.i === knobI)?.fn ?? null;
+          const customized = Array.from({ length: model.layerNum ?? 4 }, (_, l) => cfg.layers?.[l]?.[knobI])
+            .some((fn) => fn != null && !(defFn && fn.type === defFn.type && fn.code === defFn.code && fn.param === defFn.param));
+          await H.hidSetKnobMode(this.dev, customized, devLog);
+        }
+        return res;
       } catch (e) {
-        devLog('er', '宏下发失败: ' + e.message);
+        devLog('er', '改键/宏下发失败: ' + e.message);
         return { error: e.message };
-      } finally { this._applying = false; }
+      }
     }
     // 模拟模式：演示打包结果
     const { blob, count } = P.buildMacroBlob(macros);
     devLog('in', `[模拟] 宏下发：${count} 条 / ${blob.length}B（cmd 0x03 ×${Math.ceil(blob.length / P.MACRO_CHUNK)} 块）`);
-    const parts = [];
-    if (Object.keys(byLayer).length) parts.push(Object.entries(byLayer).map(([l, k]) => `层${l}×${Object.keys(k).length}宏键`).join(' '));
-    if (Object.keys(cmdByLayer).length) parts.push(Object.entries(cmdByLayer).map(([l, k]) => `层${l}×${Object.keys(k).length}命令键`).join(' '));
-    if (parts.length) devLog('in', `[模拟] 指派：${parts.join('；')}`);
-    if (skippedCmds.length) devLog('in', `[模拟] 跳过：${skippedCmds.join('、')}（复位键盘＝主机侧全局操作，无固件键位编码）`);
+    const parts = Object.entries(patchByLayer).map(([l, k]) => `层${l}×${Object.keys(k).length}键`);
+    if (parts.length) devLog('in', `[模拟] 指派：${parts.join(' ')}`);
+    if (skipped.length) devLog('in', `[模拟] 跳过：${skipped.join('、')}`);
     devLog('tx', `blob 头 32B: ${P.hex(blob.subarray(0, 32))}`);
     return { sent: false, sim: true };
   },
 
+  // 设置类下发的通道路由：0x13（2.4G/接收器）走 hidSetX；有线走 feat520 读改写（hidSetSettingWired）
   async applySleep(minutes) {
+    return lock(async () => {
+    const { model } = state;
+    const gen = P.cfgGenOf(model);
+    const tbl = P.modelSleepTable(model);
+    const idx = P.sleepUiIndexOf(tbl, minutes);
+    const patch = gen === 'fw26' ? { sleepHw: tbl.hw[idx] & 0xff, gen } : { sleepIndex: idx, gen };
     if (this.mode === 'hid' && this.dev?.opened) {
-      try { await H.hidSetSleep(this.dev, minutes, devLog); } catch (e) { devLog('er', e.message); }
-    } else devLog('in', `[模拟] 下发睡眠 ${minutes} 分钟（配置片0 payload[9] = 档位索引 ${P.sleepIndexOf(minutes)}）`);
+      try {
+        if (this.canSend13()) await H.hidSetSleep(this.dev, minutes, devLog, model);
+        else await H.hidSetSettingWired(this.dev, patch, devLog);
+      } catch (e) { devLog('er', e.message); }
+    } else devLog('in', `[模拟] 下发睡眠 ${minutes} 分钟（${gen === 'fw26' ? `blob[24] = HW 值 ${tbl.hw[idx]}` : `配置片0 payload[9] = 档位索引 ${idx}`}）`);
+    });
   },
 
   async applyDebounce(level) {
+    return lock(async () => {
+    const { model } = state;
+    const gen = P.cfgGenOf(model);
     if (this.mode === 'hid' && this.dev?.opened) {
-      try { await H.hidSetDebounce(this.dev, level, devLog); } catch (e) { devLog('er', e.message); }
-    } else devLog('in', `[模拟] 下发按键去抖 ${level} 档（配置片0 payload[2]/[3] = ${level - 1}）`);
+      try {
+        if (this.canSend13()) await H.hidSetDebounce(this.dev, level, devLog, model);
+        else await H.hidSetSettingWired(this.dev, { debounce: level, gen }, devLog);
+      } catch (e) { devLog('er', e.message); }
+    } else devLog('in', `[模拟] 下发按键去抖 ${level} 档（${gen === 'fw26' ? 'blob[3]' : '配置片0 payload[2]/[3]'} = ${gen === 'fw26' ? level : level - 1}）`);
+    });
   },
 
   async applyTapSens(level) {
+    return lock(async () => {
+    const { model } = state;
+    const gen = P.cfgGenOf(model);
     if (this.mode === 'hid' && this.dev?.opened) {
-      try { await H.hidSetTapSens(this.dev, level, devLog); } catch (e) { devLog('er', e.message); }
-    } else devLog('in', `[模拟] 下发 Tap 灵敏度 ${level} 档（配置片0 payload[8] = ${level}）`);
+      try {
+        if (this.canSend13()) await H.hidSetTapSens(this.dev, level, devLog, model);
+        else await H.hidSetSettingWired(this.dev, { tapSens: level, gen }, devLog);
+      } catch (e) { devLog('er', e.message); }
+    } else devLog('in', `[模拟] 下发 Tap 灵敏度 ${level} 档（${gen === 'fw26' ? 'blob[22]' : '配置片0 payload[8]'} = ${level}）`);
+    });
   },
 
   async factoryReset() {
+    return lock(async () => {
     if (this.mode === 'hid' && this.dev?.opened) {
       try { await H.hidFactoryReset(this.dev, devLog); } catch (e) { devLog('er', e.message); }
     } else devLog('in', '[模拟] 恢复出厂（灯光配置写回模板 + 调色板 + 保存）');
+    });
+  },
+
+  // ---------- 屏幕（K65 等带屏型号；协议 2026-10 反汇编实证：feat520 通道，见 device/film.js） ----------
+  // 屏幕通道 = 主接口（与灯光 feat520 同一管线），无独立接口
+  bestForScreen(devs) {
+    const list = (devs?.length ? devs : (this.hidDevs ?? [])).filter((d) => d?.opened);
+    return F.pickFilmIface(list, devLog);
+  },
+
+  // 烧录屏幕帧。frames: RGB565 Uint8Array[]（页面层用 film.rgb565Pack 打包）；
+  // opts.delays: 每帧播放间隔 ms（协议为单一全局值，取首帧）。
+  // onProgress(done, total)；shouldAbort() 轮询取消。演示模式只记录不发。
+  async burnScreen(frames, opts = {}) {
+    return lock(() => this.burnScreenInner(frames, opts));
+  },
+  async burnScreenInner(frames, { onProgress, shouldAbort, delays } = {}) {
+    if (this.mode === 'hid' && this.dev?.opened) {
+      const dev = this.bestForScreen();
+      if (!dev) return { sent: false, error: 'no-iface' };
+      try { return await F.filmBurn(dev, frames, devLog, { onProgress, shouldAbort, delays }); }
+      catch (e) { devLog('er', '屏幕烧录失败: ' + e.message); return { sent: false, error: e.message }; }
+    }
+    devLog('in', `[模拟] 屏幕烧录：${frames.length} 帧（演示模式不写入真机）`);
+    for (let i = 0; i < frames.length; i++) {
+      if (shouldAbort?.()) return { sent: false, aborted: true };
+      onProgress?.(i + 1, frames.length);
+      await new Promise((r) => setTimeout(r, 40)); // 模拟烧录节奏
+    }
+    return { sent: false, sim: true, chunks: frames.length, echoes: 0 };
+  },
+
+  // SetGIFParam（cmd 0x0D）——烧录开始/收尾命令，屏幕页调试区用（op: 1 开始 0 收尾 2 取消）
+  async setGifParam(op, frameCount, delayMs) {
+    return lock(async () => {
+    if (this.mode === 'hid' && this.dev?.opened) {
+      const dev = this.bestForScreen();
+      if (!dev) return null;
+      try { return await F.filmGifParam(dev, op, frameCount, delayMs, devLog, 1); }
+      catch (e) { devLog('er', 'SetGIFParam 失败: ' + e.message); return null; }
+    }
+    devLog('in', `[模拟] SetGIFParam(op=${op}, 帧数=${frameCount}, 延时=${delayMs}ms)`);
+    return null;
+    });
   },
 
   // ---------- 调试台手动收发（HID 控制台的报文构造器走这里，不绕过设备管理器） ----------
   // 发送 output report（首字节 = report ID），发完读一帧回显（300ms）。target 省略 = 主接口。
   async rawSendOutput(target, bytes) {
+    return lock(async () => {
     if (this.mode !== 'hid' || !target?.opened) { devLog('er', '手动发送需要真机模式（WebHID）'); return false; }
     try {
       const f = Uint8Array.from(bytes);
@@ -417,10 +561,12 @@ export const device = {
       devLog('er', '发送失败: ' + e.message);
       return false;
     }
+    });
   },
 
   // 发送 feature report（有线键盘的命令通道）。readBack: 随后读一次同号应答并记录。
   async rawSendFeature(target, reportId, data, readBack = true) {
+    return lock(async () => {
     if (this.mode !== 'hid' || !target?.opened) { devLog('er', '手动发送需要真机模式（WebHID）'); return false; }
     const rid = 'F' + reportId.toString(16).padStart(2, '0');
     try {
@@ -443,6 +589,7 @@ export const device = {
       }
     }
     return true;
+    });
   },
 
   // ---------- 只读探针（调试台「快捷」区；全部不向设备写入任何配置） ----------
@@ -453,66 +600,133 @@ export const device = {
     return this.readPsdAny();
   },
 
-  // 电量（仅 2.4G 通道有 0x4A 应答）
+  // 电量：fw26（K65）走 GetPower（feat520，两通道皆可）；fw24 走 0x4A（仅 2.4G 接收器应答）
   async probeBattery() {
     if (this.mode !== 'hid') { devLog('er', '探针需要真机模式'); return; }
-    if (this.channelOf(this.dev) !== 'wireless') {
-      devLog('warn', '电量查询仅 2.4G 无线通道应答（有线连接无 0x4A）');
-      return;
+    const { model } = state;
+    if (model && P.cfgGenOf(model) === 'fw26') {
+      devLog('in', '探针 · 电量查询（GetPower cmd 09/01，feat520 通道）…');
+    } else {
+      if (this.channelOf(this.dev) !== 'wireless') {
+        devLog('warn', '该型号电量查询走 0x13 cmd 0x4A——仅 2.4G 无线通道应答（有线连接无响应）');
+        return;
+      }
+      devLog('in', '探针 · 电量查询（0x4A）…');
     }
-    devLog('in', '探针 · 电量查询（0x4A）…');
     await this.readBattery();
   },
 
   // 读灯光配置（0x44 十片）并按协议字段解码。configSummary 也供有线探针复用。
   async probeConfig() {
-    if (this.mode !== 'hid') { devLog('er', '探针需要真机模式'); return; }
+    return lock(async () => {
+    if (this.mode !== 'hid') { devLog('er', '探针需要真机模式'); return null; }
     const dev = this.bestForLights();
     if (!this.canSend13(dev)) { devLog('er', '读配置需要 0x13 输出通道（2.4G 接收器）；有线键盘请用「有线命令扫描」探针'); return null; }
     devLog('in', '探针 · 读灯光配置（cmd 0x44 十片）…');
     const cfg = await H.readConfig(dev, devLog);
     if (!cfg) { devLog('er', '读配置失败（无应答或不完整）'); return null; }
-    const info = this.configSummary(P.parseConfig(cfg));
+    const info = this.configSummary(P.parseConfig(cfg, state.model));
     devLog('ok', `当前配置：${info}`);
     return cfg;
+    });
   },
 
-  // 读键位层（cmd 0x41，读改写流程的读半边）
+  // 读键位层（cmd 0x41，读改写流程的读半边）。槽数 = max(matrix)+1（matrix 为固件槽位，
+  // 非键数——Hi75 为 90 槽 > 82 键）
   async probeKeymap(layer = 0) {
+    return lock(async () => {
     if (this.mode !== 'hid') { devLog('er', '探针需要真机模式'); return; }
     const { model } = state;
     if (!model?.keys?.length) { devLog('er', '未加载型号（键数未知），无法读键位层'); return; }
     const dev = this.bestForLights();
     if (!this.canSend13(dev)) { devLog('er', '读键位层需要 0x13 输出通道（2.4G 接收器）'); return; }
-    devLog('in', `探针 · 读键位层 ${layer}（cmd 0x41，${model.keys.length} 键 × dword）…`);
-    const bytes = await H.readMatrix13(dev, layer, model.keys.length * 4, devLog);
+    const slotCount = Math.max(...model.keys.map((k) => k.matrix)) + 1;
+    devLog('in', `探针 · 读键位层 ${layer}（cmd 0x41，${slotCount} 槽 × dword）…`);
+    const bytes = await H.readMatrix13(dev, layer, slotCount * 4, devLog);
     if (!bytes) { devLog('er', '键位层读取失败（无应答）'); return; }
     const words = [];
     for (let i = 0; i + 4 <= bytes.length && words.length < 8; i += 4) {
       words.push(((bytes[i + 3] << 24) | (bytes[i + 2] << 16) | (bytes[i + 1] << 8) | bytes[i]) >>> 0);
     }
-    devLog('ok', `层${layer} 键位表 ${bytes.length / 4} 键，前 8 个 dword：${words.map((w) => w.toString(16).padStart(8, '0')).join(' ')}`);
+    devLog('ok', `层${layer} 键位表 ${bytes.length / 4} 槽，前 8 个 dword：${words.map((w) => w.toString(16).padStart(8, '0')).join(' ')}`);
     return bytes;
+    });
   },
 
   // 有线命令族扫描（520B feature 帧，cmd 83-8A 只读遍历）+ 配置解码
   async probeWiredStores() {
+    return lock(async () => {
     if (this.mode !== 'hid') { devLog('er', '探针需要真机模式'); return; }
-    const dev = (this.hidDevs ?? []).find((d) => d?.opened && H.hasFeatureReport(d, 6));
-    if (!dev) { devLog('er', '有线探针需要声明 feature report 6 的接口（520B 帧通道）'); return; }
+    const dev = (this.hidDevs ?? []).find((d) => d?.opened && (H.hasFeatureReport(d, 6) || H.hasFeatureReport(d, 9)));
+    if (!dev) { devLog('er', '有线探针需要声明 feature report 6/9 的接口（520B 帧通道）'); return; }
     devLog('in', '探针 · 有线命令族扫描（feat520 读 83-8A × sub 0-2，各 400B）…');
     const res = await H.hidReadConfigWired(dev, devLog);
-    if (res?.blob) devLog('ok', `有线配置命中 cmd ${res.cmd.toString(16)}/${res.sub}：${this.configSummary(P.parseConfig(P.blobToFrames(res.blob)))}`);
+    if (res?.blob) devLog('ok', `有线配置命中 cmd ${res.cmd.toString(16)}/${res.sub}：${this.configSummary(P.parseConfig(P.blobToFrames(res.blob), state.model))}`);
     return res;
+    });
   },
 
-  // 配置解码摘要（0x13 十片 / 有线 400B blob 通用；效果字节域 = SW 槽位）
+  // 配置解码摘要（0x13 十片 / 有线 400B blob 通用；fw26 效果字节已反映射回 UI 号）
   configSummary(c) {
     if (!c) return '解析失败（帧不完整）';
     const { fxName, fxOffName } = i18n;
     const effectName = c.effect === 0 ? fxOffName() : c.effect === 21 ? fxName(19) : fxName(c.effect);
     const color = c.colorMode === 0x01 ? '单色/RGB' : c.colorMode === 0x03 ? '炫彩' : `模式${c.colorMode}`;
     const sleep = c.sleepMin != null ? `${c.sleepMin} 分钟` : `索引${c.frames[0][13]}`;
-    return `效果 SW#${c.effect}（${effectName}）· 色彩 ${color} · 去抖 ${c.debounce ?? '?'} 档 · Tap ${c.tapSens} 档 · 睡眠 ${sleep}`;
+    // 效果参数对（亮度,速度|颜色号nibble）——官方驱动抓包对比的关键字节
+    let pair = '';
+    if (c.effect >= 1 && c.effect <= 18) {
+      const blob = P.framesToBlob(c.frames);
+      const off = 58 + 2 * (c.effect - 1);
+      pair = ` · 参数对[${blob[off]},${blob[off + 1]}]`;
+    }
+    return `效果 SW#${c.effect}（${effectName}）· 色彩 ${color}${pair} · 去抖 ${c.debounce ?? '?'} 档 · Tap ${c.tapSens} 档 · 睡眠 ${sleep}`;
   },
 };
+
+// ---------- 适配诊断包 ----------
+// 给 issue / 社区适配贡献者的一键只读快照（CONTRIBUTING.md 贡献路径②）：
+// 环境、当前设备与已授权接口能力、最近一次型号识别结果（device.lastIdentify，由
+// connect.js 在每次识别后写入）、完整日志。**不含宏内容/涂色等用户数据**（仅计数），
+// 可直接作为附件公开上传。
+export function buildDiagnostics() {
+  const vp = (d) => `0x${(d?.vendorId ?? 0).toString(16).padStart(4, '0')}:0x${(d?.productId ?? 0).toString(16).padStart(4, '0')}`;
+  const m = state.model;
+  return {
+    app: 'keyhub-diag', ver: 1,
+    exported: new Date().toISOString(),
+    build: BUILD,
+    ua: navigator.userAgent,
+    url: location.href,
+    lang: state.lang ?? null,
+    webhid: H.hidAvailable(),
+    webusb: !!navigator.usb,
+    device: {
+      mode: device.mode,
+      channel: device.dev ? device.channelOf(device.dev) : null,
+      productName: device.dev?.productName ?? null,
+      vidPid: device.dev ? vp(device.dev) : null,
+      interfaces: (device.hidDevs ?? []).filter(Boolean).map((d) => ({
+        productName: d.productName ?? null,
+        vidPid: vp(d),
+        opened: !!d.opened,
+        reports: device.ifaceSummary(d),
+      })),
+    },
+    model: m ? {
+      slug: state.slug, name: m.name, short: m.short, fw: m.fw ?? null,
+      keys: m.keys?.length ?? null, psd: m.psd ?? null,
+      ledoptsRows: m.ledopts?.length ?? null, hasScreen: !!m.screen,
+    } : null,
+    devices: (state.devices ?? []).map((d) => ({ slug: d.slug, channel: d.channel ?? null, demo: !!d.demo })),
+    lastIdentify: device.lastIdentify ?? null,
+    macroCount: (state.macros ?? []).length, // 宏内容可能含用户输入，只报数量
+    log: getLogs(),
+  };
+}
+
+export function exportDiagnostics() {
+  const name = `keyhub-diag-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+  download(name, JSON.stringify(buildDiagnostics(), null, 2));
+  devLog('ok', `适配诊断包已导出：${name}（${getLogs().length} 行日志）——提交 issue 时请作为附件上传`);
+}

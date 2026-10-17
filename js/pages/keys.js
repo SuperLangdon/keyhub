@@ -48,8 +48,9 @@ export function renderKeysPage(root, ctx) {
   const rebuildLayers = () => {
     layerTabs.innerHTML = '';
     layerNames().forEach((nm, i) => {
-      layerTabs.appendChild(h('div', {
+      layerTabs.appendChild(h('button', {
         class: 'tab' + (layer === i ? ' on' : ''),
+        type: 'button',
         text: nm,
         onclick: () => { layer = i; rebuildLayers(); refreshAll(); },
       }));
@@ -72,6 +73,9 @@ export function renderKeysPage(root, ctx) {
       for (const vk of keyboardKeyList()) add(vkName(vk), makeKeyFunc(vk));
     } else if (tab === 'ms') {
       for (const [b, nm] of MOUSE()) add(nm, makeMouseFunc(b));
+      grid.appendChild(h('div', { class: 'dim', style: 'grid-column:1/-1;line-height:1.6' },
+        L('鼠标动作的固件编码仅「左键」有驱动实证（0x05000000）；右/中/上滚沿用同值直传（效果可能等同左键），前进/后退/下滚/双击暂不下发——均待真机校准。',
+          'Only Mouse-L has a driver-verified firmware code; R/M/wheel-up reuse the same value (may act as L), fwd/back/wheel-down/double-click are not written yet — pending calibration.')));
     } else if (tab === 'cmd') {
       // 常用命令（原驱动同款 9 项 + 设置组 3 项；code↔标签映射逆向自驱动网格构建序列）
       for (const c of COMMON_CMDS) add(t(c.tag, L('命令 ', 'Cmd ') + c.code.toString(16)), makeCommonCmdFunc(c.code));
@@ -158,7 +162,7 @@ export function renderKeysPage(root, ctx) {
     if (selKey == null) return;
     delete cfg.layers[layer][selKey];
     if (layer === 0) for (const k of model.keys) if (k.i === selKey && k.fn) cfg.layers[0][selKey] = { ...k.fn };
-    if (layer === 1 && model.fn1[selKey]) cfg.layers[1][selKey] = { ...model.fn1[selKey] };
+    if (layer === 1 && model.fn1?.[selKey]) cfg.layers[1][selKey] = { ...model.fn1[selKey] };
     updateCfg({});
     rebuildGrid(); refreshMarks();
   } }, iconEl('rotate-ccw', 13), L('恢复此键', 'Reset this key'));
@@ -167,7 +171,7 @@ export function renderKeysPage(root, ctx) {
     if (!(await confirmBox(L('恢复默认', 'Reset to defaults'), L('将当前层所有按键恢复为驱动默认值？', 'Restore every key on this layer to the driver defaults?')))) return;
     const def = {};
     if (layer === 0) for (const k of model.keys) if (k.fn) def[k.i] = { ...k.fn };
-    if (layer === 1) for (const [i, f] of Object.entries(model.fn1)) def[i] = { ...f };
+    if (layer === 1) for (const [i, f] of Object.entries(model.fn1 ?? {})) def[i] = { ...f };
     cfg.layers[layer] = def;
     updateCfg({});
     rebuildGrid(); refreshMarks();
@@ -184,7 +188,7 @@ export function renderKeysPage(root, ctx) {
   const rebuildTabs = () => {
     tabs.innerHTML = '';
     for (const [id, nm] of TABS) {
-      tabs.appendChild(h('div', { class: 'tab' + (tab === id ? ' on' : ''), text: nm, onclick: () => { tab = id; rebuildTabs(); rebuildGrid(); } }));
+      tabs.appendChild(h('button', { class: 'tab' + (tab === id ? ' on' : ''), type: 'button', text: nm, onclick: () => { tab = id; rebuildTabs(); rebuildGrid(); } }));
     }
   };
 
@@ -192,8 +196,7 @@ export function renderKeysPage(root, ctx) {
     return t('tc_kb_led' + ui, String(ui));
   }
   function keyCaption(i) {
-    const k = model.keys.find((x) => x.i === i);
-    return k ? `K${i}` : `K${i}`;
+    return 'K' + i;
   }
 
   // ---- 键盘交互 & 角标 ----
@@ -248,8 +251,8 @@ export function renderKeysPage(root, ctx) {
     ),
     grid,
     h('p', { class: 'dim keys-note',
-      text: L('FN 层功能在键盘上以蓝色角标显示；宏与常用命令指派随「宏」页的「写入键盘」一并下发（读改写当前层键位表）。',
-        'FN-layer functions show as blue badges; macro & common-command assignments are written via the Macro page\'s "Write to keyboard" (read-modify-write).') }),
+      text: L('FN 层功能在键盘上以蓝色角标显示；全部指派（键盘/组合键/多媒体/灯光/宏/命令）随「宏」页的「写入键盘」读改写各层键位表一并下发；带旋钮的型号（如 Hi75 RGB）改指旋钮键时自动切换旋钮为自定义模式。',
+        'FN-layer functions show as blue badges; ALL assignments (keys/combos/media/lighting/macro/commands) are written via the Macro page\'s "Write to keyboard" (read-modify-write); knob models (e.g. Hi75 RGB) auto-switch the knob to custom mode when it is remapped.') }),
   ));
   rebuildLayers();
   rebuildTabs();

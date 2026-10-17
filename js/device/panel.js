@@ -2,7 +2,7 @@
 // 报文构造发送（0x13 协议帧 / 特征报告 / 原始输出报告）+ 只读探针。
 // 发送一律经设备管理器（device.rawSendOutput/rawSendFeature，不绕过架构边界），
 // 探针全部只读；模拟模式下发送被拒绝并记录错误行。
-import { onDevLog, getLogs, clearLogs, devLog, device } from './index.js';
+import { onDevLog, getLogs, clearLogs, devLog, device, exportDiagnostics } from './index.js';
 import * as P from './protocol.js';
 import { on } from '../store.js';
 import { h, download } from '../ui.js';
@@ -313,7 +313,7 @@ export function initPanel() {
   // ---------- 只读探针 ----------
   const PROBES = [
     { label: () => L('识别 GetPSD', 'Identify GetPSD'), tip: () => L('型号识别：对全部已授权接口逐条路径探测（只读）', 'Model identification across all granted interfaces (read-only)'), run: () => device.probePsd() },
-    { label: () => L('电量 0x4A', 'Battery 0x4A'), tip: () => L('电量查询（仅 2.4G 无线通道应答，只读）', 'Battery query (2.4G only, read-only)'), run: () => device.probeBattery() },
+    { label: () => L('电量查询', 'Battery'), tip: () => L('电量查询（K65 = GetPower feat520 通道；LEOBOG = 0x4A 仅 2.4G 应答；只读）', 'Battery query (K65: GetPower over feat520; LEOBOG: 0x4A, 2.4G only; read-only)'), run: () => device.probeBattery() },
     { label: () => L('读配置 0x44', 'Config 0x44'), tip: () => L('读灯光配置十片并按协议字段解码（2.4G 通道，只读）', 'Read & decode the 10-frame light config (2.4G, read-only)'), run: () => device.probeConfig() },
     { label: () => L('键位层 0x41', 'Keymap 0x41'), tip: () => L('读层 0 键位表 dword（2.4G 通道，只读）', 'Read layer-0 keymap dwords (2.4G, read-only)'), run: () => device.probeKeymap(0) },
     { label: () => L('有线命令扫描', 'Wired cmd sweep'), tip: () => L('有线 520B feature 帧：只读遍历 cmd 83-8A × sub 0-2 并解码配置（只读）', 'Wired 520B frames: read-only sweep of cmds 83-8A (read-only)'), run: () => device.probeWiredStores() },
@@ -356,6 +356,8 @@ export function initPanel() {
     const head = ['KeyHub HID console log', `exported: ${new Date().toLocaleString()}`, `ua: ${navigator.userAgent}`, `url: ${location.href}`, '─'.repeat(60), ''].join('\n');
     download(`keyhub-hid-${new Date().toISOString().replace(/[:.]/g, '-')}.log`, head + getLogs().map(fmt).join('\n'));
   });
+  // 适配诊断包（社区贡献/issue 排障）：环境+接口能力+最近识别结果+完整日志的只读 JSON 快照
+  document.getElementById('dbg-diag').addEventListener('click', exportDiagnostics);
 
   // 初始回放缓冲里的历史日志
   rerender();

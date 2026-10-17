@@ -1,16 +1,25 @@
 // 主页连接中心：键盘灯波动画（无设备空态）+ 设备卡片列表 + 「添加新设备」向导
 // 型号识别：所有型号共用 VID/PID，但固件支持 GetPSD 查询（report ID 0x05，逆向自原驱动
-// OemDrv.exe 的 GetPassword）——连上后读 6 字节 PSD 与 index.json 各型号 psd 匹配；
-// 识别失败（无响应 / PSD 未知）时回退为用户手动选型号。
+// OemDrv.exe 的 GetPassword）——连上后读 6 字节 PSD 与 index.json 各型号 psd 匹配：
+// 唯一命中→确认框；PSD 撞车（开放注册表后可能出现）→候选集内按设备名消歧，仍歧义转手动；
+// 识别失败（无响应 / PSD 未知）→blob 滑窗、设备名兜底，最终回退用户手动选型号。
 // 添加的设备记录（slug + 通道）与各型号配置均保存在 localStorage，点卡片进入设置。
-import { h, toast } from './ui.js';
+import { h, toast, modalA11y } from './ui.js';
 import { iconEl } from './ui-icons.js';
 import { L } from './i18n.js';
 import { state, save } from './store.js';
-import { device, hidReady, onDevLog, getLogs, clearLogs } from './device/index.js';
+import { device, hidReady, onDevLog, getLogs, clearLogs, devLog, exportDiagnostics } from './device/index.js';
+import { DEVICE_FAMILIES, rebuildDeviceFamilies } from './device/protocol.js';
 
 function vidPid(dev) {
   return `${dev.vendorId.toString(16).padStart(4, '0')}:${dev.productId.toString(16).padStart(4, '0')}`;
+}
+// 各设备族的 VID/PID 文案（手动向导连接方式行）："258A:010C / 3554:FA09 · 258A:019D / 258A:0150"
+function idsHex(fam, channel) {
+  const list = channel === 'wired' ? [fam.wired] : channel === 'wireless' ? [fam.wireless] : [fam.wired, fam.wireless];
+  return list.filter(Boolean)
+    .map(({ vid, pid }) => `${vid.toString(16).padStart(4, '0').toUpperCase()}:${pid.toString(16).padStart(4, '0').toUpperCase()}`)
+    .join(' / ');
 }
 function devLabel(dev) {
   return `${dev.productName || 'Keyboard'} (${vidPid(dev)})`;
@@ -21,15 +30,36 @@ let idxPromise = null;
 function modelIndex() {
   if (!idxPromise) {
     idxPromise = fetch('assets/models/index.json').then((r) => r.json())
+      .then((idx) => {
+        // 注册表驱动设备族表（requestDevice 过滤 / channelOf / knownDevices）：
+        // 社区贡献的新 VID/PID 型号加载即生效。重建失败不阻断——内置表继续兜底。
+        if (rebuildDeviceFamilies(idx))
+          devLog('in', `设备族表已按注册表重建：${DEVICE_FAMILIES.length} 族（${DEVICE_FAMILIES.map((f) => f.name).join(' · ')}）`);
+        return idx;
+      })
       .catch((e) => { idxPromise = null; throw e; }); // 失败不缓存：下次调用重试
   }
   return idxPromise;
 }
 
-// PSD（6 字节）↔ 型号匹配：与 index.json 各型号 psd（十六进制，来自 KB.ini 的 Psd=）逐字节全等
-function matchModelByPsd(psd, idx) {
-  if (!psd || psd.length !== 6) return null;
-  return idx.find((m) => Array.isArray(m.psd) && m.psd.length === 6 && m.psd.every((b, i) => b === psd[i])) ?? null;
+// PSD（6 字节）↔ 型号匹配：与 index.json 各型号 psd（十六进制，来自 KB.ini 的 Psd=）逐字节全等。
+// 返回**全部**命中——注册表开放共建后 PSD 可能撞车（厂商模板值复用），与 name/blob
+// 匹配同款策略：命中多个时先在候选集内按设备名消歧，仍歧义则交用户手动选择，
+// 绝不静默取第一个，防止配置下发到错误布局。撞车在入库时由 validate-registry 查重把关。
+function matchModelsByPsd(psd, idx) {
+  if (!psd || psd.length !== 6) return [];
+  return idx.filter((m) => Array.isArray(m.psd) && m.psd.length === 6 && m.psd.every((b, i) => b === psd[i]));
+}
+
+// VID/PID 识别（兜底）：注册表把 wired/wireless VID/PID 记到**型号粒度**（来自各 KB.ini）。
+// 族内共用 ID 的（LEOBOG 全系 3554:fa09）会命中多个 → 视为歧义不取；唯一命中（如 K65 的
+// 258a:0150——其 2.4G 固件不实现 0x13 cmd05 GetPSD，设备名又是通用的「Gaming KB」）才可定型号。
+// 比设备名兜底硬：ID 是驱动配置里的硬数据，产品字符串厂商随便填。
+function matchModelsById(dev, idx) {
+  if (!dev) return [];
+  return idx.filter((m) =>
+    (m.wired && m.wired.vid === dev.vendorId && m.wired.pid === dev.productId) ||
+    (m.wireless && m.wireless.vid === dev.vendorId && m.wireless.pid === dev.productId));
 }
 
 // 设备名识别（备用）：USB 产品字符串 ↔ index.json 的 name（KB.ini Name=）/ short 比对。
@@ -55,8 +85,8 @@ function matchModelByName(productName, idx) {
 }
 
 // 3632 应答块滑窗匹配（有线识别兜底）：在 blob 中查找与任一型号 psd 全等的连续 6 字节。
-// PSD 在应答中的偏移未经抓包确定；滑窗 + 型号表双重校验（9 型号 PSD 互不相同）足够安全。
-// 命中多个不同型号 → null（防止误配）。
+// PSD 在应答中的偏移未经抓包确定；滑窗 + 型号表双重校验（PSD 全局唯一性由
+// validate-registry 入库查重保证）足够安全。命中多个不同型号 → null（防止误配）。
 function matchModelByBlob(blob, idx) {
   if (!blob || blob.length < 6) return null;
   const hits = new Set();
@@ -288,8 +318,9 @@ function render() {
 }
 
 // ---------- 设备卡片 ----------
-// 电量缓存：键盘 2.4G 闲置会快睡，频繁查询只会超时，按分钟级节流
-const batteryCache = { at: 0, val: null };
+// 电量缓存（按 VID:PID 键控——多把键盘同插时不能串显）：键盘 2.4G 闲置会快睡，
+// 频繁查询只会超时，按分钟级节流
+const batteryCache = new Map(); // "vid:pid" -> { at, val }
 
 async function deviceCard(rec) {
   const idx = await modelIndex();
@@ -326,9 +357,11 @@ async function deviceCard(rec) {
   });
   // 电量：仅无线卡片 + 真机已连接时查询（0x4A，休眠无响应则不显示）
   if (wireless && device.mode === 'hid') {
-    const cached = Date.now() - batteryCache.at < 60_000 ? batteryCache.val : undefined;
+    const key = vidPid(device.dev);
+    const c = batteryCache.get(key);
+    const cached = c && Date.now() - c.at < 60_000 ? c.val : undefined;
     Promise.resolve(cached ?? device.readBattery()).then((b) => {
-      if (cached === undefined) Object.assign(batteryCache, { at: Date.now(), val: b });
+      if (cached === undefined) batteryCache.set(key, { at: Date.now(), val: b });
       if (!b) return;
       battSlot.replaceChildren(iconEl('battery', 15), h('span', { class: 'dc-batt-pct', text: `${b.percent}%` }));
       battSlot.classList.remove('hidden');
@@ -339,21 +372,90 @@ async function deviceCard(rec) {
 
 // 点设备卡片：真机卡片先尝试静默重连已授权的设备（不弹窗，取消/失败按当前模式进入；
 // 已授权的多个接口全部打开，识别命令可能只在其中一个上）；
-// 演示卡片 = 纯模拟器：不重连，且真机仍连接着时先断开，避免演示会话误向硬件下发
-async function openDevice(rec) {
-  const meta = (await modelIndex()).find((m) => m.slug === rec.slug);
+// 演示卡片 = 纯模拟器：不重连，且真机仍连接着时先断开，避免演示会话误向硬件下发。
+// 识别（GetPSD HID 往返）可能耗时数百 ms 到数秒——期间连点只走第一次，防止并发多次进入。
+let openingDevice = false;
+
+function openDevice(rec) {
+  if (openingDevice) return;
+  openingDevice = true;
+  openDeviceInner(rec).finally(() => { openingDevice = false; });
+}
+
+async function openDeviceInner(rec) {
+  let meta = (await modelIndex()).find((m) => m.slug === rec.slug);
   if (!meta) { toast(L('该型号的数据文件缺失', 'Model data missing'), true); return; }
   if (rec.demo) {
     if (device.mode === 'hid') device.disconnect();
-  } else if (device.mode !== 'hid' && hidReady()) {
-    const opened = [];
-    for (const known of await device.knownDevices()) {
-      try { if (!known.opened) await known.open(); opened.push(known); }
-      catch { /* 单个接口打开失败则跳过 */ }
+  } else if (hidReady()) {
+    if (device.mode !== 'hid') {
+      const opened = [];
+      for (const known of await device.knownDevices()) {
+        try { if (!known.opened) await known.open(); opened.push(known); }
+        catch { /* 单个接口打开失败则跳过 */ }
+      }
+      if (opened.length) device.attach(opened[0], opened.slice(1));
     }
-    if (opened.length) device.attach(opened[0], opened.slice(1));
+    // 进真机卡片前重新识别（GetPSD 只读）：LEOBOG 全系共用同一对 VID/PID，持久授权的
+    // 接口集合可能实际是另一款键盘——不核对就进卡片型号，下发会按错误布局写硬件。
+    // 唯一命中且与卡片不符 → 按实际键盘进入（与添加向导同语义）；识别失败维持卡片型号。
+    // 局限：USB 描述符无法区分同型号的两把键盘，多把同型号键盘请逐把授权/连接。
+    if (device.mode === 'hid') {
+      try {
+        const { psd } = await device.readPsdAny();
+        if (psd) {
+          const hit = matchModelsByPsd(psd, await modelIndex());
+          if (hit.length === 1 && hit[0].slug !== rec.slug) {
+            toast(L(`已连接的键盘识别为 ${hit[0].short}（卡片是 ${meta.short}），按实际键盘进入`,
+              `The connected keyboard identifies as ${hit[0].short} (card: ${meta.short}) — opening the actual model`));
+            onEnterApp(hit[0]);
+            return;
+          }
+        }
+      } catch { /* 识别失败不阻断进入 */ }
+    }
   }
   onEnterApp(meta);
+}
+
+// ---------- 开页自动重连 ----------
+// WebHID 授权按源持久化：「添加设备」时 Chrome 授权一次，之后 navigator.hid.getDevices()
+// 静默返回全部已授权设备——不弹窗、无需用户手势。启动时若设备列表里有真机记录，就把
+// 已授权接口全部打开并挂接；运行中插回键盘由 hid connect 事件接管（每接口发一事件，
+// 防抖后统一收集——键盘的厂商功能可能分散在多个 USB 接口上，须等事件到齐再挂接）。
+// 型号不在此核对：同族 VID/PID 无法区分具体型号，点卡片进入时 openDevice 会重新识别。
+let plugTimer = 0;
+async function silentReconnect(why) {
+  if (!hidReady() || device.mode === 'hid') return;
+  if (!state.devices.some((r) => !r.demo)) return; // 没有真机记录（首次使用 / 纯演示）不碰 HID
+  try {
+    await modelIndex(); // knownDevices 按注册表设备族过滤，须等注册表重建完成
+    const known = await device.knownDevices();
+    if (!known.length) return; // 从未授权 / 授权已撤销：保持演示模式，绝不主动弹授权框
+    const opened = [];
+    for (const d of known) {
+      try { if (!d.opened) await d.open(); opened.push(d); }
+      catch { /* 单个接口打开失败（被其他程序占用等）则跳过 */ }
+    }
+    if (!opened.length) return;
+    const primary = device.bestForLights(opened) ?? opened[0];
+    device.attach(primary, opened.filter((x) => x !== primary));
+    toast(L(`已自动连接键盘（${opened.length} 个接口）`, `Keyboard auto-connected (${opened.length} interface${opened.length > 1 ? 's' : ''})`));
+    devLog('ok', `自动重连（${why}）：已打开此前授权的 ${opened.length} 个接口`);
+    render(); // 刷新卡片（无线卡片的电量查询依赖 device.mode === 'hid'）
+  } catch (e) {
+    devLog('warn', `自动重连失败（${why}）: ${e?.message ?? e}`);
+  }
+}
+
+export function autoConnect() {
+  silentReconnect('启动');
+  if (typeof navigator.hid?.addEventListener === 'function') {
+    navigator.hid.addEventListener('connect', () => {
+      clearTimeout(plugTimer);
+      plugTimer = setTimeout(() => silentReconnect('插回'), 250);
+    });
+  }
 }
 
 // ---------- 添加设备：点击即弹 HID 请求 → 自动识别型号 → 确认框（识别错了可转手动；识别失败转手动） ----------
@@ -385,12 +487,40 @@ async function addDevice() {
       addBusy = L('识别型号中…', 'Identifying…'); render();
       const { psd, reason, blob } = await device.readPsdAny(devs);
       const idx = await modelIndex();
-      let meta = psd ? matchModelByPsd(psd, idx) : null;
-      if (!meta && blob) meta = matchModelByBlob(blob, idx);
+      // 三态：唯一命中 → 确认框；多个命中 → 候选集内按设备名消歧，仍歧义转手动（候选高亮）；
+      // 零命中 → blob 滑窗 / 设备名兜底（原链路）
+      const psdHits = psd ? matchModelsByPsd(psd, idx) : [];
+      // 最近一次识别结果（适配诊断包 buildDiagnostics 引用；未知 PSD 时贡献者据此报 issue）
+      device.lastIdentify = {
+        at: new Date().toISOString(),
+        psd: psd ? [...psd] : null,
+        reason: reason ?? null,
+        blobBytes: blob?.length ?? 0,
+        hits: psdHits.map((x) => x.slug),
+      };
+      let meta = psdHits.length === 1 ? psdHits[0] : null;
+      if (!meta && !psdHits.length && blob) meta = matchModelByBlob(blob, idx);
       if (!meta) {
         const named = devs.map((d) => d.productName).find(Boolean);
-        meta = matchModelByName(named, idx);
-        if (meta) toast(L(`已按设备名识别为 ${meta.short}（PSD 通道不可用）`, `Identified as ${meta.short} by device name (PSD channel unavailable)`));
+        if (psdHits.length > 1) {
+          // PSD 撞车：PSD 是硬信号，仅在候选集内按设备名消歧，候选外不取；
+          // 消歧失败弹候选对话框（布局图对照终审），取消则落回手动向导（候选高亮）
+          meta = named ? matchModelByName(named, psdHits) : null;
+          if (!meta) {
+            const pick = await openCandidatePick(psdHits, devs, chan);
+            if (pick) { finishAdd(pick, devs, chan); return; }
+          }
+        } else {
+          // 兜底链：VID/PID（注册表型号粒度 ID，唯一命中才取）→ 设备名
+          const idHits = matchModelsById(devs[0], idx);
+          meta = idHits.length === 1 ? idHits[0] : null;
+          if (meta) {
+            toast(L(`已按 VID/PID 识别为 ${meta.short}（PSD 通道无应答）`, `Identified as ${meta.short} by VID/PID (PSD query unanswered)`));
+          } else {
+            meta = matchModelByName(named, idx);
+            if (meta) toast(L(`已按设备名识别为 ${meta.short}（PSD 通道不可用）`, `Identified as ${meta.short} by device name (PSD channel unavailable)`));
+          }
+        }
       }
       addBusy = null;
 
@@ -409,7 +539,7 @@ async function addDevice() {
           'The identify command was rejected by this interface — if the picker listed multiple rows, retry with another one (grants accumulate); see the HID console, or pick the model manually'), true);
         else toast(L('键盘未响应识别查询：2.4G 请先按任意键唤醒键盘；有线连接若弹窗里有多行设备，请逐行授权再连（会累积，命令通道往往在其中一行）——仍失败可手动选择型号',
           'No reply to the identify query — on 2.4G press a key to wake the keyboard first; when wired, if the picker lists several rows grant them one by one and retry (grants accumulate — the command channel is usually on another row); otherwise pick the model manually'), true);
-        failed = { psd: !!psd, reason, count: devs.length, name: devs.map((d) => d.productName).find(Boolean) };
+        failed = { psd: !!psd, reason, count: devs.length, name: devs.map((d) => d.productName).find(Boolean), candidates: psdHits.length > 1 ? psdHits : null };
       }
 
       render();
@@ -460,8 +590,10 @@ function finishAdd(meta, devs, chan) {
 // 识别结果确认框：返回 true=确认添加、'manual'=识别错了转手动、null=取消
 function openConfirmAdd(meta, devs, chan) {
   return new Promise((resolve) => {
-    const close = (v) => { mask.remove(); resolve(v); };
     const mask = h('div', { class: 'modal-mask' });
+    let unA11y = () => {};
+    const close = (v) => { unA11y(); mask.remove(); resolve(v); };
+    unA11y = modalA11y(mask, () => close(null));
     const primary = device.bestForLights(devs) ?? devs[0];
     const box = h('div', { class: 'modal cfm' },
       h('h4', {}, L('已识别设备', 'Device identified')),
@@ -494,6 +626,67 @@ function openConfirmAdd(meta, devs, chan) {
   });
 }
 
+// PSD 撞车候选消歧：签名同时命中多个型号（不同厂商复用模板值）时，让用户对照
+// 布局图终审——绝不静默取第一个。返回选中的 meta；取消返回 null（外层落回手动向导）。
+function openCandidatePick(cands, devs, chan) {
+  return new Promise((resolve) => {
+    const mask = h('div', { class: 'modal-mask' });
+    let unA11y = () => {};
+    const close = (v) => { unA11y(); mask.remove(); resolve(v); };
+    unA11y = modalA11y(mask, () => close(null));
+    const box = h('div', { class: 'modal cfm' },
+      h('h4', {}, L('这款键盘是哪个型号？', 'Which model is this keyboard?')),
+      h('p', { class: 'wiz-note', text: L('识别签名同时命中多个注册表型号（不同厂商复用了同一签名）。请对照键盘实物点选：',
+        'The identify signature matches multiple registry models (vendors reused the same signature). Pick the one matching your keyboard:') }),
+      h('div', { class: 'wiz-models cand-list' },
+        ...cands.map((m) => h('button', { class: 'wiz-model', type: 'button', onclick: () => close(m) },
+          h('img', { src: `assets/models/${m.slug}/keyimg.png`, alt: m.short }),
+          h('b', { text: m.short }),
+          h('span', { text: m.sub }),
+          h('span', { text: `${L('键数', 'Keys')}: ${m.keys}` }),
+        ))),
+      h('div', { class: 'wiz-foot' },
+        h('span', { style: 'flex:1' }),
+        h('button', { class: 'btn', onclick: () => close(null) }, L('手动选择全部型号', 'Pick from all models')),
+      ),
+    );
+    box.addEventListener('click', (e) => e.stopPropagation());
+    mask.addEventListener('click', () => close(null));
+    mask.append(box);
+    document.body.appendChild(mask);
+  });
+}
+
+// 适配请求 issue 模板（.github/ISSUE_TEMPLATE/adapter-request.md 的内联版）：
+// 自动填入最近一次识别结果（PSD/命中/原因），贡献者不用手抄十六进制。
+function adapterIssueText() {
+  const li = device.lastIdentify;
+  const psdHex = li?.psd?.length ? '0x' + li.psd.map((b) => b.toString(16).padStart(2, '0')).join(' ') : null;
+  return [
+    '### 键盘型号 / Keyboard model',
+    '- 品牌 / 型号（键盘正面或包装盒）: ',
+    '- 布局（60% / 65% / 75% / 98 键…）: ',
+    '- 连接方式: 有线 / 2.4G 接收器 / 蓝牙',
+    '',
+    '### 官方驱动 / Official driver',
+    '- 能否找到官方驱动（下载链接）: ',
+    '',
+    '### 识别情况 / Identification（KeyHub 自动填写）',
+    ...(li ? [
+      `- PSD: ${psdHex ?? '未读到'}`,
+      `- 匹配: ${li.hits?.length ? '命中 ' + li.hits.join(', ') : `未命中（reason: ${li.reason ?? '?'}）`}`,
+      `- 识别时间: ${li.at}`,
+    ] : ['- （本会话未尝试识别——连上键盘点「添加新设备」后再导出）']),
+    '',
+    '### 附件 / Attachments',
+    '- keyhub-diag-*.json 适配诊断包（HID 控制台右上角纸飞机按钮导出）',
+    '- 键盘正面全键位实拍照片',
+    '',
+    `环境: ${navigator.userAgent}`,
+    `页面: ${location.href}`,
+  ].join('\n');
+}
+
 // 型号选择网格：点选回调 onSel(meta)，选中态高亮由这里统一处理
 function modelGrid(onSel) {
   const wrap = h('div', { class: 'wiz-models' });
@@ -518,8 +711,10 @@ function modelGrid(onSel) {
 export function openDemoPicker() {
   return new Promise((resolve) => {
     let sel = null;
-    const close = (v) => { mask.remove(); resolve(v); };
     const mask = h('div', { class: 'modal-mask' });
+    let unA11y = () => {};
+    const close = (v) => { unA11y(); mask.remove(); resolve(v); };
+    unA11y = modalA11y(mask, () => close(null));
     const ok = h('button', { class: 'btn primary', disabled: true, onclick: () => close(sel) },
       L('进入演示', 'Enter demo'));
     const box = h('div', { class: 'modal wizard' },
@@ -606,8 +801,11 @@ function openManualWizard({ preset = null, failed = null, devs = [], chan = null
     let cur = devs;               // 向导当前持有的连接（可能被重连替换）
     let curChan = chan;
     const bug = bugLogBubble();
-    const close = (v) => { bug.dispose(); mask.remove(); resolve(v); };
     const mask = h('div', { class: 'modal-mask' });
+    let unA11y = () => {};
+    const close = (v) => { unA11y(); bug.dispose(); mask.remove(); resolve(v); };
+    // Esc = 取消向导并关闭连接（与点遮罩同语义）
+    unA11y = modalA11y(mask, () => { closeDevs(cur); close(null); });
 
     // 连接状态行（重连后刷新）
     const connIcon = h('span', { class: 'dc-icons' });
@@ -623,19 +821,25 @@ function openManualWizard({ preset = null, failed = null, devs = [], chan = null
     // ① 型号网格（preset 预选高亮，用户可改选）
     const ok = h('button', { class: 'btn primary', disabled: !sel, onclick: () => okClick() }, L('确认添加', 'Confirm'));
     const models = modelGrid((m) => { sel = m; ok.disabled = false; });
-    if (preset) {
+    // 预选高亮：preset 单选（on+hot）；PSD 撞车候选集整组 hot（不代选，用户终审）
+    const candSlugs = new Set([...(failed?.candidates ?? []).map((m) => m.slug)]);
+    if (preset || candSlugs.size) {
       modelIndex().then((idx) => {
         const cards = [...models.querySelectorAll('.wiz-model')];
-        const card = cards.find((c, i) => idx[i]?.slug === preset.slug);
-        if (card) { card.classList.add('on', 'hot'); card.scrollIntoView({ block: 'nearest' }); }
+        for (let i = 0; i < cards.length; i++) {
+          const slug = idx[i]?.slug;
+          if (preset && slug === preset.slug) { cards[i].classList.add('on', 'hot'); cards[i].scrollIntoView({ block: 'nearest' }); }
+          else if (candSlugs.has(slug)) cards[i].classList.add('hot');
+        }
       });
     }
 
     // ② 连接方式：与当前连接一致时「确认添加」直接复用；不一致则先按所选通道重连
+    // VID/PID 文案从 protocol.js 设备族表动态拼出，覆盖全部已适配型号
     const opts = [
-      { v: 'any', name: L('自动', 'Auto'), desc: '258A:010C / 3554:FA09' },
-      { v: 'wired', name: L('有线连接', 'Wired'), desc: L('USB 数据线直连', 'USB cable') + ' · 258A:010C' },
-      { v: 'wireless', name: L('2.4G 接收器', '2.4G dongle'), desc: L('接收器需插在电脑上', 'dongle plugged in') + ' · 3554:FA09' },
+      { v: 'any', name: L('自动', 'Auto'), desc: DEVICE_FAMILIES.map((f) => idsHex(f, 'any')).join(' · ') },
+      { v: 'wired', name: L('有线连接', 'Wired'), desc: L('USB 数据线直连', 'USB cable') + ' · ' + DEVICE_FAMILIES.map((f) => idsHex(f, 'wired')).join(' / ') },
+      { v: 'wireless', name: L('2.4G 接收器', '2.4G dongle'), desc: L('接收器需插在电脑上', 'dongle plugged in') + ' · ' + DEVICE_FAMILIES.map((f) => idsHex(f, 'wireless')).join(' / ') },
     ];
     const radios = opts.map((o) => {
       const inp = h('input', { type: 'radio', name: 'wiz-chan', checked: o.v === selChan ? '' : null });
@@ -678,12 +882,35 @@ function openManualWizard({ preset = null, failed = null, devs = [], chan = null
     }
 
     const failedNote = failed
-      ? (failed.psd
+      ? (failed.candidates?.length
+        ? L(`该键盘的 PSD 同时命中 ${failed.candidates.length} 个型号（${failed.candidates.map((m) => m.short).join(' / ')}，已在下方高亮）。请对照实物选择：`,
+          `This keyboard's PSD matches ${failed.candidates.length} models (${failed.candidates.map((m) => m.short).join(' / ')}, highlighted below). Pick the one that matches your keyboard:`)
+        : failed.psd
         ? L('读到的 PSD 未匹配到任何型号。可选择连接方式后重连，或手动选择型号：',
           'The reported PSD matches no known model. Reconnect with another transport or pick the model manually:')
         : L(`未能自动识别（${failed.count} 个接口，设备名「${failed.name || '-'}」）。可选择连接方式后重连，或手动选择型号：`,
           `Automatic identification failed (${failed.count} interface(s), name "${failed.name || '-'}"). Reconnect with another transport or pick the model manually:`))
       : null;
+
+    // 社区适配贡献块（识别失败时显示）：把「被拒之门外的用户」变成「贡献者」
+    const contribute = failed ? h('details', { class: 'wiz-contribute' },
+      h('summary', {}, L('帮社区适配这款键盘 →', 'Help adapt this keyboard →')),
+      h('p', { text: L('这款键盘还没被型号注册表准确识别。两条贡献路径（详见仓库 CONTRIBUTING.md）：',
+        "This keyboard isn't accurately identified by the registry yet. Two ways to contribute (see CONTRIBUTING.md):") }),
+      h('p', { text: L('① 找得到官方驱动（本方案键盘大多有）：用 tools/convert.mjs 一键转成型号适配包提 PR，约 10 分钟；',
+        '① Official driver available (most keyboards on this platform ship one): convert it with tools/convert.mjs and open a PR — about 10 minutes;') }),
+      h('p', { text: L('② 手里只有键盘：导出下方的适配诊断包并提交「适配请求」 issue，等有真机/驱动的贡献者接力。',
+        '② Keyboard only: export the diagnostics bundle below and open an adapter-request issue — contributors with the hardware/driver will pick it up.') }),
+      h('div', { class: 'wiz-contribute-btns' },
+        h('button', { class: 'btn', onclick: () => exportDiagnostics() }, L('导出适配诊断包', 'Export diagnostics')),
+        h('button', { class: 'btn', onclick: async () => {
+          try {
+            await navigator.clipboard.writeText(adapterIssueText());
+            toast(L('issue 模板已复制（含识别 PSD）——到仓库 Issues 页粘贴提交', 'Issue template copied (includes identified PSD) — paste it on the repo Issues page'));
+          } catch (e) { toast(L('复制失败：', 'Copy failed: ') + e.message, true); }
+        } }, L('复制 issue 模板', 'Copy issue template')),
+      ),
+    ) : null;
 
     const box = h('div', { class: 'modal wizard' },
       bug.bubble,
@@ -694,6 +921,7 @@ function openManualWizard({ preset = null, failed = null, devs = [], chan = null
       h('div', { class: 'wiz-conn' }, connIcon, vidEl, stateEl),
       h('p', { class: 'wiz-note', text: failedNote ?? L('识别结果不对？请手动选择你的型号；也可更换连接方式后重连或回退自动识别。',
         'Wrong identification? Pick your model manually; you can also switch the transport and reconnect, or fall back to auto-detection.') }),
+      contribute,
       h('div', { class: 'wiz-step' },
         h('div', { class: 'wiz-label' }, h('i', { class: 'step-no', text: '1' }), L('选择型号', 'Pick a model')),
         models,

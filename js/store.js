@@ -1,7 +1,12 @@
 // 全局状态 + localStorage 持久化
 import { L } from './i18n.js';
 
-const LS_KEY = 'leobog-web-v1';
+// 构建标记：由 tools/bump-build.mjs 生成（git 短哈希 + 日期），改 js 后跑一次脚本——
+// 日志/诊断包引用它核对浏览器是否拿到最新代码（避免模块缓存误导调试）。
+// （原定义于 main.js，迁此供 device 层诊断包引用且不引入循环依赖）
+export const BUILD = '2026-10-18.367e861+reenter';
+
+const LS_KEY = 'leobog-web-v1'; // 历史键名（更名 KeyHub 前沿用）：不改名，保住老用户的 localStorage 数据
 
 export const state = {
   lang: 'zh',
@@ -33,7 +38,7 @@ export function defaultCfg(model) {
   for (let l = 0; l < model.layerNum; l++) {
     const m = {};
     if (l === 0) for (const k of model.keys) if (k.fn) m[k.i] = { ...k.fn };
-    if (l === 1) for (const [i, f] of Object.entries(model.fn1)) m[i] = { ...f };
+    if (l === 1) for (const [i, f] of Object.entries(model.fn1 ?? {})) m[i] = { ...f };
     layers.push(m);
   }
   return {
@@ -83,15 +88,45 @@ export function restore() {
 
 // ---------- 配置导入导出 ----------
 export function exportAll() {
-  return JSON.stringify({ app: 'leobog-web', ver: 1, exported: new Date().toISOString(), cfgs: state.cfgs, macros: state.macros }, null, 2);
+  return JSON.stringify({ app: 'keyhub', ver: 2, exported: new Date().toISOString(), cfgs: state.cfgs, macros: state.macros }, null, 2);
 }
 
+const isPlainObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+
+// 导入形状校验：cfg 只收「值为对象且 layers 为数组」的条目；宏事件只收
+// {at:number, kind:'dn'|'up', code:number}。畸形条目丢弃并计数（返回值供 UI 提示），
+// 防止手工损坏/旧版导出文件把 localStorage 污染成进型号即崩溃的状态。
+// 宏 id：保留文件内合法且唯一的 id（键位指派按 id 引用），仅把缺失/重复的换成新号。
 export function importAll(json) {
   const data = JSON.parse(json);
-  if (data.app !== 'leobog-web') throw new Error(L('不是本应用的配置文件', 'Not a profile exported from this app'));
-  if (data.cfgs) state.cfgs = { ...state.cfgs, ...data.cfgs };
-  if (Array.isArray(data.macros)) state.macros = data.macros;
+  if (data.app !== 'keyhub' && data.app !== 'leobog-web') throw new Error(L('不是本应用的配置文件', 'Not a profile exported from this app'));
+  let cfgN = 0, dropped = 0;
+  if (isPlainObj(data.cfgs)) {
+    for (const [slug, cfg] of Object.entries(data.cfgs)) {
+      if (typeof slug === 'string' && slug && isPlainObj(cfg) && Array.isArray(cfg.layers)) { state.cfgs[slug] = cfg; cfgN++; }
+      else dropped++;
+    }
+  }
+  let macN = 0;
+  if (Array.isArray(data.macros)) {
+    const clean = [];
+    for (const m of data.macros) {
+      if (!isPlainObj(m) || typeof m.name !== 'string') { dropped++; continue; }
+      const events = (Array.isArray(m.events) ? m.events : []).filter((e) =>
+        isPlainObj(e) && Number.isFinite(e.at) && (e.kind === 'dn' || e.kind === 'up') && Number.isFinite(e.code));
+      clean.push({ id: Number.isInteger(m.id) && m.id > 0 ? m.id : 0, name: m.name, events });
+      macN++;
+    }
+    let next = Math.max(0, ...clean.map((m) => m.id));
+    const seen = new Set();
+    for (const m of clean) {
+      if (m.id > 0 && !seen.has(m.id)) seen.add(m.id);
+      else m.id = ++next;
+    }
+    state.macros = clean;
+  }
   save();
+  return { cfgs: cfgN, macros: macN, dropped };
 }
 
 export function setCfg(cfg) {

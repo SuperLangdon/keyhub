@@ -4,7 +4,7 @@ import { iconEl } from '../ui-icons.js';
 import { t, L } from '../i18n.js';
 import { state, updateCfg, save, exportAll, importAll } from '../store.js';
 import { device } from '../device/index.js';
-import { SLEEP_LEVELS, sleepIndexOf } from '../device/protocol.js';
+import { modelSleepTable, sleepUiIndexOf } from '../device/protocol.js';
 
 export function renderSettingsPage(root, ctx) {
   const { model, cfg } = state;
@@ -28,6 +28,21 @@ export function renderSettingsPage(root, ctx) {
   } }, iconEl('search', 12), L('查询', 'Query'));
   device.readFwVersion(false).then((text) => { if (text) fwVal.textContent = text; }).catch(() => { /* 静默 */ });
 
+  // 电量（K65 = GetPower feat520 通道；LEOBOG = 0x4A 仅 2.4G；官方 UI 以 ShowPower 隐藏，此处主动开放）
+  const batVal = h('span', { class: 'v-mono', text: L('未查询', 'Not queried') });
+  const batBtn = h('button', { class: 'btn', onclick: async () => {
+    batBtn.disabled = true;
+    batVal.textContent = L('查询中…', 'Querying…');
+    const r = await device.readBattery();
+    batBtn.disabled = false;
+    if (r) { batVal.textContent = `${r.percent}%`; toast(L(`电量 ${r.percent}%`, `Battery ${r.percent}%`)); }
+    else {
+      batVal.textContent = L('无响应', 'No response');
+      toast(L('电量查询无响应（详见调试台；键盘休眠时按键唤醒后重试）', 'Battery query failed (see debug panel; press a key to wake the keyboard and retry)'), true);
+    }
+  } }, iconEl('battery', 12), L('查询', 'Query'));
+  const showBattery = (model.channelMask & 2) !== 0; // 三模/双模型号才有电池
+
   // 设备信息
   const info = h('div', { class: 'set-card' },
     cardHead('keyboard', L('设备信息', 'Device info')),
@@ -35,6 +50,9 @@ export function renderSettingsPage(root, ctx) {
     h('div', { class: 'kv' },
       h('span', { class: 'k', text: L('固件版本', 'Firmware version') }),
       h('span', { style: 'display:inline-flex;align-items:center;gap:6px' }, fwVal, fwBtn)),
+    ...(showBattery ? [h('div', { class: 'kv' },
+      h('span', { class: 'k', text: t('tc_msg5', '剩余电量') }),
+      h('span', { style: 'display:inline-flex;align-items:center;gap:6px' }, batVal, batBtn))] : []),
     kv('VID:PID', `${hx(model.vid)}:${hx(model.pid)}` + (model.vidW ? ` / ${hx(model.vidW)}:${hx(model.pidW)} (2.4G)` : ''), true),
     kv('Keys / Layers', `${model.keys.length} / ${model.layerNum}`, true),
     kvConn(L('连接', 'Connection'), connLabel(), device.mode === 'hid'),
@@ -53,19 +71,23 @@ export function renderSettingsPage(root, ctx) {
   };
   const sleepText = (m) => (m === 0 ? L('关闭', 'Off') : m + ' ' + t('tc_msg37', '分钟'));
 
-  const sleepRow = mkLevel(t('tc_msg49', '休眠'), SLEEP_LEVELS,
-    sleepIndexOf(cfg.sleep ?? model.sleepTime ?? 0), sleepText,
+  // 睡眠档位按型号（K65 等 fw26 = 官方驱动内置档 [30..1200] 分钟、写入 HW=分钟/30；
+  // LEOBOG fw24 = 旧档位表 [0..120] 分钟、写入索引——见 protocol.js modelSleepTable）
+  const sleepTbl = modelSleepTable(model);
+  const sleepRow = mkLevel(t('tc_msg49', '休眠'), sleepTbl.ui,
+    sleepUiIndexOf(sleepTbl, cfg.sleep ?? model.sleepTime ?? 0), sleepText,
     (v) => { cfg.sleep = v; updateCfg({}); device.applySleep(v); toast(t('tc_msg49', '休眠') + L('时间已下发', ' time applied')); });
   const dbRow = mkLevel(t('tc_msg54', '按键去抖'), [1, 2, 3, 4, 5], (cfg.debounce ?? 2) - 1,
     (l) => l + ' ' + t('tc_msg55', '档'),
     (v) => { cfg.debounce = v; updateCfg({}); device.applyDebounce(v); toast(t('tc_msg54', '按键去抖') + L('已下发', ' applied')); });
-  const tsRow = mkLevel('Tap ' + t('tc_kb12', '灵敏度'), [1, 2, 3, 4, 5, 6, 7, 8], (cfg.tapSens ?? 4) - 1,
+  // Tap 灵敏度：官方 KB.ini ShowTapTip=0 的型号（K65/Hi75 等）隐藏该设置
+  const tapRows = model.show?.tapTip === false ? [] : [mkLevel('Tap ' + t('tc_kb12', '灵敏度'), [1, 2, 3, 4, 5, 6, 7, 8], (cfg.tapSens ?? 4) - 1,
     (l) => l + ' ' + t('tc_msg55', '档'),
-    (v) => { cfg.tapSens = v; updateCfg({}); device.applyTapSens(v); toast('Tap ' + t('tc_kb12', '灵敏度') + L('已下发', ' applied')); });
+    (v) => { cfg.tapSens = v; updateCfg({}); device.applyTapSens(v); toast('Tap ' + t('tc_kb12', '灵敏度') + L('已下发', ' applied')); })];
 
   const devSet = h('div', { class: 'set-card' },
     cardHead('settings', L('设备设置', 'Device settings')),
-    sleepRow, dbRow, tsRow,
+    sleepRow, dbRow, ...tapRows,
     h('p', { class: 'dim', style: 'margin-top:8px', text: t('tc_msg34', '在无线模式下，设备空闲指定的时间后会自动进入休眠状态') }),
   );
 
@@ -78,8 +100,9 @@ export function renderSettingsPage(root, ctx) {
     const f = importInp.files[0];
     if (!f) return;
     try {
-      importAll(await f.text());
-      toast(L('配置已导入，返回型号页重新进入生效', 'Profile imported — leave to the model page and re-enter to take effect'));
+      const r = importAll(await f.text());
+      toast(L(`配置已导入：${r.macros} 条宏、${r.cfgs} 个型号配置${r.dropped ? `（丢弃 ${r.dropped} 条无效条目）` : ''}——返回型号页重新进入生效`,
+        `Imported: ${r.macros} macros, ${r.cfgs} profile(s)${r.dropped ? ` (${r.dropped} invalid entries dropped)` : ''} — leave to the model page and re-enter to take effect`));
     } catch (e) {
       toast(L('导入失败: ', 'Import failed: ') + e.message, true);
     }

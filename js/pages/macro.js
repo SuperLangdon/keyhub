@@ -5,13 +5,23 @@ import { t, L } from '../i18n.js';
 import { state, save } from '../store.js';
 import { vkName } from '../vk.js';
 import { CODE_VK } from '../codevk.js';
-import { device } from '../device/index.js';
+import { device, devLog } from '../device/index.js';
 
-let nextId = 1;
+// 新宏 id：取当前（含 localStorage 恢复的）全部 id 的最大值 + 1。
+// 不能用模块级计数器——刷新页面后它会重置回 1，与已恢复的宏撞号，
+// 导致 find(id) 选错宏、写入键盘时烧错宏内容。
+const nextMacroId = () => Math.max(0, ...state.macros.map((m) => Number(m.id) || 0)) + 1;
+
 let _stopRec = null;
 
 export function renderMacroPage(root, ctx) {
   let curId = state.macros[0]?.id ?? null;
+  // 旧版本 bug 可能留下重复 id 的宏：不自动迁移（键位指派按 id 匹配，重排会烧错宏），
+  // 仅警告提示用户删除重录 / 导出后重新导入（导入侧会统一重排 id）
+  {
+    const dup = state.macros.length - new Set(state.macros.map((m) => m.id)).size;
+    if (dup > 0) devLog('warn', `检测到 ${dup} 个重复宏 id（旧版数据）——指派与写入可能作用在错误的宏上，建议删除重录`);
+  }
   let recording = false;
   let recEvents = null;
   let recT0 = 0;
@@ -54,7 +64,7 @@ export function renderMacroPage(root, ctx) {
   const newBtn = h('button', { class: 'btn primary', text: t('tc_macro_msg2', '新建宏'), onclick: async () => {
     const nm = await promptBox(t('tc_macro_msg3', '请输入名称'), L('宏 ', 'Macro ') + (state.macros.length + 1));
     if (!nm) return;
-    const m = { id: nextId++, name: nm, events: [] };
+    const m = { id: nextMacroId(), name: nm, events: [] };
     state.macros.push(m);
     curId = m.id;
     save(); rebuildList(); rebuildEvents();
@@ -94,12 +104,12 @@ export function renderMacroPage(root, ctx) {
     if (!recording) return;
     if (e.repeat) return;
     const vk = CODE_VK[e.code] ?? CODE_VK[e.code?.toUpperCase?.()] ?? null;
-    recEvents.push({ at: Math.round(performance.now() - recT0), kind: 'dn', code: vk ?? 0, label: vk ? vkName(vk) : (e.code || '?') });
+    recEvents.push({ at: Math.round(performance.now() - recT0), kind: 'dn', code: vk ?? 0, label: vk ? vkName(vk) : (e.code || '?'), mapped: !!vk });
   };
   const onKeyUp = (e) => {
     if (!recording) return;
     const vk = CODE_VK[e.code] ?? CODE_VK[e.code?.toUpperCase?.()] ?? null;
-    recEvents.push({ at: Math.round(performance.now() - recT0), kind: 'up', code: vk ?? 0, label: vk ? vkName(vk) : (e.code || '?') });
+    recEvents.push({ at: Math.round(performance.now() - recT0), kind: 'up', code: vk ?? 0, label: vk ? vkName(vk) : (e.code || '?'), mapped: !!vk });
   };
   recBtn.addEventListener('click', startRec);
   stopBtn.addEventListener('click', stopRec);
@@ -128,10 +138,13 @@ export function renderMacroPage(root, ctx) {
         ));
       }
       prevAt = e.at;
-      evBox.appendChild(h('div', { class: 'mev' },
+      // 无 HID 映射的键（FN 等本机键）：时间轴照常显示，但写入键盘时会被固件编码丢弃——
+      // 灰显 + 悬停说明，避免「看到的和写进键盘的不一致」无提示（旧数据按 code===0 判定）
+      const unmapped = e.mapped === false || (e.mapped == null && !e.code);
+      evBox.appendChild(h('div', { class: 'mev' + (unmapped ? ' unmapped' : '') },
         h('span', { class: 't', text: (e.at / 1000).toFixed(3) + 's' }),
         h('span', { class: e.kind === 'dn' ? 'act-dn' : 'act-up', text: e.kind === 'dn' ? L('↓ 按下', '↓ Down') : L('↑ 释放', '↑ Up') }),
-        h('span', { text: e.label || vkName(e.code) || '—' }),
+        h('span', { text: e.label || vkName(e.code) || '—', title: unmapped ? L('此键无 HID 映射，写入键盘时会被忽略', 'No HID mapping — ignored when written to the keyboard') : '' }),
         h('span', { class: 'mev-x', title: L('删除', 'Delete'), onclick: () => {
           m.events.splice(m.events.indexOf(e), 1); save(); rebuildEvents();
         } }, iconEl('x', 11)),

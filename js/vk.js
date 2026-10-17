@@ -1,5 +1,6 @@
 // Windows VK 码表与键值功能编解码（与原驱动 keycode 32 位编码一致）
 import { state } from './store.js';
+import { CMD_HW } from './device/protocol.js';
 
 export const VK_NAME = new Map([
   [0x08, 'Backspace'], [0x09, 'Tab'], [0x0D, 'Enter'], [0x13, 'Pause'], [0x14, 'Caps'],
@@ -146,23 +147,23 @@ export function sameFunc(a, b) {
 // tc_cmd10=禁用按键（韩文包 키 비활성화；zh/en 留空）→ 对应本页底部的「无功能」；
 // tc_cmd11-13（锁Win/锁键盘/复位键盘）是驱动全局设置项，不在按键指派网格内。
 export const COMMON_CMDS = [
-  { code: 0x11, tag: 'tc_cmd1', hw: 0x00010101 },
-  { code: 0x13, tag: 'tc_cmd2', hw: 0x00010201 }, // 锁定计算机
-  { code: 0x12, tag: 'tc_cmd3', hw: 0x00010301 },
-  { code: 0x14, tag: 'tc_cmd4', hw: 0x00010401 },
-  { code: 0x15, tag: 'tc_cmd5', hw: 0x00010501 },
-  { code: 0x19, tag: 'tc_cmd6', hw: 0x00000801 },
-  { code: 0x1a, tag: 'tc_cmd7', hw: 0x00000901 },
-  { code: 0x16, tag: 'tc_cmd8', hw: 0x32020101 },
-  { code: 0x17, tag: 'tc_cmd9', hw: 0x32030101 },
+  { code: 0x11, tag: 'tc_cmd1' },
+  { code: 0x13, tag: 'tc_cmd2' }, // 锁定计算机
+  { code: 0x12, tag: 'tc_cmd3' },
+  { code: 0x14, tag: 'tc_cmd4' },
+  { code: 0x15, tag: 'tc_cmd5' },
+  { code: 0x19, tag: 'tc_cmd6' },
+  { code: 0x1a, tag: 'tc_cmd7' },
+  { code: 0x16, tag: 'tc_cmd8' },
+  { code: 0x17, tag: 'tc_cmd9' },
   // —— 以下三项原驱动放在「常用命令」设置组（非按键网格）。锁Win/锁键盘的固件键位编码
   // 存在于 keyinfo 编码器（0x492005/0x49200c），可作按键指派写入；复位键盘（0x1d）无
   // 键位编码（编码器 switch 止于 0x1c 且 default 落灯光族，全二进制无同族字节）——
   // 原驱动里它是主机发起的全局操作（等同恢复出厂），写入真机时跳过并提示。
-  { code: 0x1b, tag: 'tc_cmd11', hw: 0x32ff0701 }, // 锁Win键
-  { code: 0x1c, tag: 'tc_cmd12', hw: 0x32ff0601 }, // 锁键盘
-  { code: 0x1d, tag: 'tc_cmd13', hw: null },       // 复位键盘（无固件键位编码）
-];
+  { code: 0x1b, tag: 'tc_cmd11' }, // 锁Win键
+  { code: 0x1c, tag: 'tc_cmd12' }, // 锁键盘
+  { code: 0x1d, tag: 'tc_cmd13' }, // 复位键盘（无固件键位编码）
+].map((c) => ({ ...c, hw: CMD_HW[c.code] ?? null })); // hw 表统一由 protocol.CMD_HW 供给（keyinfo 实证）
 export function makeCommonCmdFunc(code) {
   return { type: 0x01, code, param: 0 };
 }

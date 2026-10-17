@@ -21,7 +21,14 @@
   "wireless": {
    "vid": 13652,
    "pid": 64009
-  }
+  },
+  "source": {
+   "vendor": "LEOBOG",
+   "driver": "LEOBOG ONE Setup v2.0 20250527"
+  },
+  "attribution": "keyimg.png 与适配数据派生自 LEOBOG 官方驱动安装包（版权归原作者所有，仅用于互操作适配）",
+  "contributor": "SuperLangdon",
+  "added": "2026-10-11"
  },
  {
   "slug": "a75",
@@ -45,7 +52,14 @@
   "wireless": {
    "vid": 13652,
    "pid": 64009
-  }
+  },
+  "source": {
+   "vendor": "LEOBOG",
+   "driver": "LEOBOG ONE Setup v2.0 20250527"
+  },
+  "attribution": "keyimg.png 与适配数据派生自 LEOBOG 官方驱动安装包（版权归原作者所有，仅用于互操作适配）",
+  "contributor": "SuperLangdon",
+  "added": "2026-10-11"
  },
  {
   "slug": "hi75c-pro",
@@ -69,7 +83,14 @@
   "wireless": {
    "vid": 13652,
    "pid": 64009
-  }
+  },
+  "source": {
+   "vendor": "LEOBOG",
+   "driver": "LEOBOG ONE Setup v2.0 20250527"
+  },
+  "attribution": "keyimg.png 与适配数据派生自 LEOBOG 官方驱动安装包（版权归原作者所有，仅用于互操作适配）",
+  "contributor": "SuperLangdon",
+  "added": "2026-10-11"
  },
  {
   "slug": "hi8",
@@ -93,7 +114,14 @@
   "wireless": {
    "vid": 13652,
    "pid": 64009
-  }
+  },
+  "source": {
+   "vendor": "LEOBOG",
+   "driver": "LEOBOG ONE Setup v2.0 20250527"
+  },
+  "attribution": "keyimg.png 与适配数据派生自 LEOBOG 官方驱动安装包（版权归原作者所有，仅用于互操作适配）",
+  "contributor": "SuperLangdon",
+  "added": "2026-10-11"
  },
  {
   "slug": "hi86",
@@ -117,7 +145,14 @@
   "wireless": {
    "vid": 13652,
    "pid": 64009
-  }
+  },
+  "source": {
+   "vendor": "LEOBOG",
+   "driver": "LEOBOG ONE Setup v2.0 20250527"
+  },
+  "attribution": "keyimg.png 与适配数据派生自 LEOBOG 官方驱动安装包（版权归原作者所有，仅用于互操作适配）",
+  "contributor": "SuperLangdon",
+  "added": "2026-10-11"
  },
  {
   "slug": "hi8se",
@@ -141,7 +176,14 @@
   "wireless": {
    "vid": 13652,
    "pid": 64009
-  }
+  },
+  "source": {
+   "vendor": "LEOBOG",
+   "driver": "LEOBOG ONE Setup v2.0 20250527"
+  },
+  "attribution": "keyimg.png 与适配数据派生自 LEOBOG 官方驱动安装包（版权归原作者所有，仅用于互操作适配）",
+  "contributor": "SuperLangdon",
+  "added": "2026-10-11"
  },
  {
   "slug": "hi98",
@@ -162,7 +204,14 @@
    "vid": 9610,
    "pid": 268
   },
-  "wireless": null
+  "wireless": null,
+  "source": {
+   "vendor": "LEOBOG",
+   "driver": "LEOBOG ONE Setup v2.0 20250527"
+  },
+  "attribution": "keyimg.png 与适配数据派生自 LEOBOG 官方驱动安装包（版权归原作者所有，仅用于互操作适配）",
+  "contributor": "SuperLangdon",
+  "added": "2026-10-11"
  },
  {
   "slug": "hi98-3mode",
@@ -186,7 +235,14 @@
   "wireless": {
    "vid": 13652,
    "pid": 64009
-  }
+  },
+  "source": {
+   "vendor": "LEOBOG",
+   "driver": "LEOBOG ONE Setup v2.0 20250527"
+  },
+  "attribution": "keyimg.png 与适配数据派生自 LEOBOG 官方驱动安装包（版权归原作者所有，仅用于互操作适配）",
+  "contributor": "SuperLangdon",
+  "added": "2026-10-11"
  },
  {
   "slug": "hi75-rgb",
@@ -210,6 +266,44 @@
   "wireless": {
    "vid": 13652,
    "pid": 64009
-  }
+  },
+  "source": {
+   "vendor": "LEOBOG",
+   "driver": "LEOBOG ONE Setup v2.0 20250527"
+  },
+  "attribution": "keyimg.png 与适配数据派生自 LEOBOG 官方驱动安装包（版权归原作者所有，仅用于互操作适配）",
+  "contributor": "SuperLangdon",
+  "added": "2026-10-11"
+ },
+ {
+  "slug": "k65",
+  "dir": "K65",
+  "name": "K65 Keyboard",
+  "short": "K65",
+  "sub": "65% 三模 · 滚轮 · 屏幕",
+  "keys": 66,
+  "psd": [
+   6,
+   0,
+   0,
+   0,
+   0,
+   55
+  ],
+  "wired": {
+   "vid": 9610,
+   "pid": 413
+  },
+  "wireless": {
+   "vid": 9610,
+   "pid": 336
+  },
+  "source": {
+   "vendor": "YINDIAO（银雕/BYCOMBO 同平台）",
+   "driver": "yindiao_k65"
+  },
+  "attribution": "keyimg.png 与适配数据派生自 银雕 YINDIAO 官方驱动安装包（版权归原作者所有，仅用于互操作适配）",
+  "contributor": "SuperLangdon",
+  "added": "2026-10-12"
  }
 ]

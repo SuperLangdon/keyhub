@@ -1,0 +1,33 @@
+# 注册表 + 模块语法校验（零依赖，无需 npm install）
+# - tools/validate-registry.mjs：型号注册表 schema/一致性/PSD 唯一性/协议代际闸门
+# - 逐文件 ESM 语法检查：不执行模块（多数模块依赖浏览器 DOM，check-main 会假失败）
+name: validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Registry validation
+        run: node tools/validate-registry.mjs
+      - name: Unit tests (device protocol)
+        run: node --test tools/test/protocol.test.mjs
+      - name: JS module syntax check
+        run: |
+          status=0
+          while IFS= read -r f; do
+            if ! node --input-type=module --check < "$f"; then
+              echo "::error file=$f::syntax check failed"
+              status=1
+            fi
+          done < <(find js tools \( -name '*.js' -o -name '*.mjs' \) | sort)
+          [ "$status" -eq 0 ] && echo "All modules passed syntax check"
+          exit $status

@@ -1,31 +1,39 @@
 // KeyHub — 启动与导航
-// 构建标记：改动 js 后递增，用于日志中核对浏览器是否拿到最新代码（避免模块缓存误导调试）
-export const BUILD = '2026-10-12.38（门禁：确认按钮勾选态初始同步，修复刷新后勾选不解锁）';
+// 构建标记（store.js 定义，main 再导出）：改动 js 后递增，用于日志/诊断包中核对
+// 浏览器是否拿到最新代码（避免模块缓存误导调试）
 import { loadLang, setLang, L } from './i18n.js';
-import { state, restore, save, loadCfgFor, on } from './store.js';
+import { state, restore, save, loadCfgFor, on, BUILD } from './store.js';
+export { BUILD };
 import { KeyboardView } from './keyboard/render.js';
 import { LightSim } from './keyboard/lightsim.js';
 import { device, devLog } from './device/index.js';
-import { initConnectHero, openDemoPicker, addDemoRecord } from './connect.js';
+import { initConnectHero, openDemoPicker, addDemoRecord, autoConnect } from './connect.js';
 import { initPanel } from './device/panel.js';
 import { h, toast } from './ui.js';
 import { iconEl } from './ui-icons.js';
 import { setFuncLang } from './vk.js';
-import { renderLightPage, cleanupLightPage } from './pages/light.js';
-import { renderKeysPage, cleanupKeysPage } from './pages/keys.js';
-import { renderMacroPage, cleanupMacroPage } from './pages/macro.js';
-import { renderSettingsPage } from './pages/settings.js';
-import { CODE_VK } from './codevk.js';
+// 各功能页由 PAGES 的 mod() 动态 import 按需加载（switchPage 调用），
+// 不要在此静态引入——会让懒加载失效、启动全量拉取。
 
 // ---------- 欢迎页（主页连接中心由 connect.js 渲染，型号选择走「添加设备」向导） ----------
 async function enterApp(meta) {
-  const model = await (await fetch(`assets/models/${meta.slug}/model.json`)).json();
+  let model;
+  try {
+    const r = await fetch(`assets/models/${meta.slug}/model.json`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    model = await r.json();
+  } catch (e) {
+    console.error(e);
+    toast(L(`型号数据加载失败（${meta.slug}）：${e.message}`, `Failed to load model data (${meta.slug}): ${e.message}`), true);
+    return; // 留在欢迎页，不进入残缺会话
+  }
   model.slug = meta.slug;
   loadCfgFor(meta.slug, model);
   document.getElementById('welcome').classList.add('hidden');
   document.getElementById('app').classList.remove('hidden');
   document.getElementById('tb-model-name').textContent = model.short;
   document.getElementById('tb-model-sub').textContent = model.sub + ' · ' + model.name;
+  device.configureModel(model); // K65（fw≠24）= 520B 走 report 9（布局同 LEOBOG）
   bootModel(model);
   save();
 }
@@ -52,6 +60,8 @@ const ctx = {
 const PAGES = [
   { id: 'light', icon: 'lightbulb', name: () => L('灯光', 'Lighting'), mod: () => import('./pages/light.js') },
   { id: 'keys', icon: 'keyboard', name: () => L('按键', 'Keys'), mod: () => import('./pages/keys.js') },
+  { id: 'screen', icon: 'pip', name: () => L('屏幕', 'Screen'), mod: () => import('./pages/screen.js'),
+    cond: () => !!state.model?.screen }, // 仅带屏型号（K65：model.screen 由 KB.ini ShowScreen/siScreen 生成）
   { id: 'macro', icon: 'codeXml', name: () => L('宏', 'Macros'), mod: () => import('./pages/macro.js') },
   { id: 'settings', icon: 'settings', name: () => L('设置', 'Settings'), mod: () => import('./pages/settings.js') },
 ];
@@ -78,12 +88,23 @@ async function switchPage(id) {
   const host = document.getElementById('page');
   host.innerHTML = '';
   const p = PAGES.find((x) => x.id === id);
-  const mod = await p.mod();
-  mod[`render${id[0].toUpperCase() + id.slice(1)}Page`](host, ctx);
-  curPageMod = mod;
+  try {
+    const mod = await p.mod();
+    mod[`render${id[0].toUpperCase() + id.slice(1)}Page`](host, ctx);
+    curPageMod = mod;
+  } catch (e) {
+    // 模块加载失败 / 页面渲染异常：给出可见反馈，不让导航停在空白页
+    console.error(e);
+    host.replaceChildren(h('p', { class: 'dim', style: 'padding:20px' },
+      L(`页面加载失败（${id}）：${e.message}`, `Failed to load page (${id}): ${e.message}`)));
+    toast(L('页面加载失败，详见控制台', 'Page failed to load — see console'), true);
+  }
 }
 
 async function bootModel(model) {
+  // 重复进入（如真机识别等待期间连点设备卡片）时先清掉旧视图——#kb-view 是 flex 行，
+  // 残留多个 .kb-view 会并排叠出多份键盘底图
+  document.getElementById('kb-view').replaceChildren();
   ctx.view = new KeyboardView(document.getElementById('kb-view'));
   await ctx.view.setModel(model);
   ctx.lightsim = new LightSim();
@@ -174,23 +195,24 @@ async function applyLang() {
 
 // ---------- 免责声明门：确认后才能进入型号选择 ----------
 // 声明文案有实质变更时把版本号 +1，已确认过的用户会重新看到门禁
-const GATE_VER = 1;
+// （v2：项目从 LEOBOG 单品牌扩展为多厂商型号注册表，措辞随之改为按注册表表述）
+const GATE_VER = 2;
 const GATE_TEXT = {
   zh: {
     badge: '非官方 · 开源驱动实现',
-    desc: '本站是 LEOBOG ONE 官方桌面驱动的<b>开源网页复刻</b>，与 LEOBOG 官方无关。设备通信协议来自同芯片键盘（AULA F75 / F87 Pro，SINO WEALTH 方案）的'
-      + '<a href="https://github.com/marcoslor/Aula-F87-Controller" target="_blank" rel="noreferrer">开源逆向项目</a>'
-      + '；型号数据、语言包与灯效帧解析自官方驱动安装包。',
-    warn: '协议<b>未经原厂键盘实测</b>，向真机写入配置可能出现预期之外的行为（灯光异常、配置错乱等）。使用本工具对设备造成的任何影响，<b>后果由使用者自行承担</b>。',
+    desc: '本站是多款 SinoWealth 方案键盘官方驱动的<b>开源网页复刻</b>，与各键盘品牌官方无关。设备通信协议来自同芯片键盘'
+      + '（AULA F75 / F87 Pro，SINO WEALTH 方案）的<a href="https://github.com/marcoslor/Aula-F87-Controller" target="_blank" rel="noreferrer">开源逆向项目</a>'
+      + '；型号数据、语言包与灯效帧解析自各品牌官方驱动安装包（LEOBOG、YINDIAO 等，来源详见型号注册表）。',
+    warn: '部分写入路径<b>未经原厂键盘实测</b>，向真机写入配置可能出现预期之外的行为（灯光异常、配置错乱等）。使用本工具对设备造成的任何影响，<b>后果由使用者自行承担</b>。',
     agree: '我已了解这是非官方开源实现，自愿承担全部使用风险',
     enter: '确认并进入',
   },
   en: {
     badge: 'Unofficial · Open-source driver',
-    desc: 'This site is an <b>open-source web replica</b> of the official LEOBOG ONE desktop driver, not affiliated with LEOBOG. The device protocol comes from '
+    desc: 'This site is an <b>open-source web replica</b> of the official desktop drivers for SinoWealth-platform keyboards, not affiliated with any keyboard vendor. The device protocol comes from '
       + '<a href="https://github.com/marcoslor/Aula-F87-Controller" target="_blank" rel="noreferrer">open-source reverse engineering</a>'
-      + ' of keyboards sharing the same chip (AULA F75 / F87 Pro, SINO WEALTH platform); model data, language packs and light frames are parsed from the official driver package.',
-    warn: 'The protocol is <b>untested against real keyboards</b>; writing configs to a real device may behave unexpectedly (lighting glitches, corrupted settings, etc.). <b>Use at your own risk.</b>',
+      + ' of keyboards sharing the same chip (AULA F75 / F87 Pro); model data, language packs and light frames are parsed from each vendor\'s official driver package (LEOBOG, YINDIAO, etc. — see the model registry for sources).',
+    warn: 'Some write paths are <b>untested against real keyboards</b>; writing configs to a real device may behave unexpectedly (lighting glitches, corrupted settings, etc.). <b>Use at your own risk.</b>',
     agree: 'I understand this is an unofficial open-source implementation and I accept all risks of using it',
     enter: 'Agree & Enter',
   },
@@ -305,6 +327,7 @@ let heroCtl = null;
     wireChrome();
     heroCtl = initConnectHero(enterApp); // 主页连接中心：动画 + 添加新设备向导
     wireGate();
+    autoConnect(); // 此前授权过的键盘开页即连（Chrome 仅首次「添加设备」时授权一次）
     devLog('in', `KeyHub 已启动（演示模式）[${BUILD}]。连接真机：回主页「添加新设备」。`);
     window.__dbg = { state, ctx, device }; // 调试句柄
     document.querySelectorAll('[data-icon]').forEach((el) => el.replaceChildren(iconEl(el.dataset.icon, 14)));

@@ -32,7 +32,12 @@ export class KeyboardView {
   async setModel(model) {
     this.model = model;
     this.img.src = `assets/models/${model.slug}/keyimg.png`;
-    await this.img.decode().catch(() => {});
+    // decode() 在后台/受限渲染器里可能永不 settle（IAB 隐藏面板实测 2026-10）——
+    // onload 已就绪即可继续，超时兜底只影响首帧测量精度，不能卡死型号进入流程
+    await Promise.race([
+      this.img.decode().catch(() => {}),
+      new Promise((r) => setTimeout(r, 1500)),
+    ]);
     const { w, h } = model.img;
     this.el.style.aspectRatio = `${w} / ${h}`;
     this.canvas.width = w; this.canvas.height = h;
