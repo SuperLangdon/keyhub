@@ -15,7 +15,7 @@
 // 真机回归（2026-10-18）：开始/收尾命令延时字段统一用完整 UI 值（驱动开始时减去的
 //   nDrawFrameTime 是其内部预览预算，固件侧不要求）——验证通过，无需再按首帧差值。
 import * as P from './protocol.js';
-import { feat520Rid, feat520Exchange } from './webhid.js';
+import { feat520Rid, feat520Exchange, getFeat520Mode, hasFeatureReport } from './webhid.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -38,13 +38,20 @@ export function rgb565Pack(imageData) {
 }
 
 // ---------- 接口选择 ----------
-// 屏幕通道 = feat520 通道 = 主接口（反汇编实证：SetGIFParam/AccessData_Page 用的是设备主句柄，
-// 无独立 vendor 接口）。返回已打开的主设备。
+// 屏幕通道 = feat520 通道（反汇编实证：SetGIFParam/AccessData_Page 走有线接口的 feature 帧，
+// 无独立 vendor 接口）。主接口可能是 2.4G 接收器（bestForLights 偏向声明 out[13] 的接口，
+// 接收器无 feat520）——不能无脑复用，须按声明挑选；均未声明返回 null（上层报 no-iface）。
 export function pickFilmIface(devs, log) {
-  const main = (devs ?? []).find((d) => d?.opened);
-  if (main) log && log('in', '屏幕通道：复用主接口 feat520 管线（协议实证，与灯光同一通道）');
-  else log && log('er', '屏幕通道：没有已打开的设备');
-  return main ?? null;
+  const list = (devs ?? []).filter((d) => d?.opened);
+  if (!list.length) { log && log('er', '屏幕通道：没有已打开的设备'); return null; }
+  const vp = (d) => `${d.vendorId.toString(16).padStart(4, '0')}:${d.productId.toString(16).padStart(4, '0')}`;
+  const want = getFeat520Mode() === 'k65' ? [9] : [6, 9]; // legacy 与 feat520Rid 同序：6 优先 9 兜底
+  for (const rid of want) {
+    const hit = list.find((d) => hasFeatureReport(d, rid));
+    if (hit) { log && log('in', `屏幕通道：选中声明 feat${rid} 的接口 ${vp(hit)}（与灯光有线管线同一通道）`); return hit; }
+  }
+  log && log('er', '屏幕通道：已打开接口均未声明 feat520（feature 6/9）——有线数据通道在键盘的有线接口上，不在 2.4G 接收器');
+  return null;
 }
 
 // ---------- SetGIFParam（0x0D）：开始 / 收尾 / 取消收尾 ----------

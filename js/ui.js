@@ -1,5 +1,5 @@
 // DOM 与弹层小工具
-import { L } from './i18n.js';
+import { t } from './i18n.js';
 
 export function h(tag, attrs = {}, ...children) {
   const el = document.createElement(tag);
@@ -20,13 +20,17 @@ export function h(tag, attrs = {}, ...children) {
 }
 
 let toastTimer = null;
-export function toast(msg, err = false) {
+// sticky = 长驻（连接排障等多行指引文案，2.2s 读不完）：带 × 手动关闭，普通 toast 仍自动隐藏
+export function toast(msg, err = false, sticky = false) {
   const el = document.getElementById('toast');
-  el.textContent = msg;
+  el.replaceChildren(h('span', { text: msg }));
+  if (sticky) el.append(h('button', { class: 'toast-x', 'aria-label': t('app.common.close'),
+    onclick: () => el.classList.add('hidden') }, '×'));
   el.classList.toggle('err', err);
+  el.classList.toggle('sticky', sticky);
   el.classList.remove('hidden');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.add('hidden'), 2200);
+  if (!sticky) toastTimer = setTimeout(() => el.classList.add('hidden'), 2200);
 }
 
 // 弹层可访问性：role/aria-modal、Esc 关闭、打开时把焦点移入弹层、关闭时还原焦点。
@@ -60,8 +64,8 @@ export function confirmBox(title, msg) {
       h('h4', { text: title }),
       h('div', { text: msg }),
       h('div', { class: 'm-foot' },
-        h('button', { class: 'btn', onclick: () => close(false) }, L('取消', 'Cancel')),
-        h('button', { class: 'btn primary', onclick: () => close(true) }, L('确定', 'OK')),
+        h('button', { class: 'btn', onclick: () => close(false) }, t('app.common.cancel')),
+        h('button', { class: 'btn primary', onclick: () => close(true) }, t('app.common.ok')),
       ),
     ));
     mask.addEventListener('click', (e) => { if (e.target === mask) close(false); });
@@ -81,8 +85,8 @@ export function promptBox(title, value = '') {
       h('h4', { text: title }),
       inp,
       h('div', { class: 'm-foot' },
-        h('button', { class: 'btn', onclick: () => close(null) }, L('取消', 'Cancel')),
-        h('button', { class: 'btn primary', onclick: () => close(inp.value.trim() || null) }, L('确定', 'OK')),
+        h('button', { class: 'btn', onclick: () => close(null) }, t('app.common.cancel')),
+        h('button', { class: 'btn primary', onclick: () => close(inp.value.trim() || null) }, t('app.common.ok')),
       ),
     ));
     inp.addEventListener('keydown', (e) => {

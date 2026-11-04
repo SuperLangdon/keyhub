@@ -182,16 +182,21 @@ export async function hidSetSettingWired(dev, patch, log) {
   return hidApplyEffectWired(dev, null, { forceColorMode: null, ...patch }, log);
 }
 
-// 每键 RGB。keyColors: {ledIndex: [r,g,b]}；selfFw: 该型号自定义模式固件号
+// 每键 RGB（自定义/Gaoshou 模式）。keyColors: {ledIndex: [r,g,b]}；selfFw: 该型号自定义模式效果字节（21）
+// 官方流程（2026-10-18 K65 版 OemDrv REA，CDev3632::ApplySetting 包装 G5KB 编排）：
+//   配置（cmd 04，含 blob[9]=1 自定义开关、blob[11]=0x20 色组 0+StartGp、blob[94/95 参数对）
+//   → SetGame(cmd 02, tag=组号, 378B 三平面，fw26 无尾片) → 保存(cmd 0A)。
+//   官方自定义模式**不发**调色板（cmd 09=SetLedRgbTab 是 19 效果×7 色槽的效果色表，仅切效果时写）。
 export async function hidApplyPerKey(dev, keyColors, selfFw, log, model = null) {
-  log && log('in', `下发每键 RGB（${Object.keys(keyColors).length} 键，自定义模式 fw#${selfFw}）`);
+  const gen = P.cfgGenOf(model);
+  log && log('in', `下发每键 RGB（${Object.keys(keyColors).length} 键，自定义模式 SW#${selfFw}${gen === 'fw26' ? '：blob[9]=1 开关 + blob[11]=0x20 色组 0' : ''}）`);
   log && log('in', 'Phase1 读取配置…');
   const cfg = await readConfig(dev, log);
   log && log('in', 'Phase2 写配置（自定义模式）…');
-  const wr = P.buildConfigWrite(cfg ?? null, { effect: selfFw, colorMode: 0x01, gen: P.cfgGenOf(model), lightHw: P.modelLightHw(model) });
+  const wr = P.buildConfigWrite(cfg ?? null, { effect: selfFw, colorMode: 0x01, gen, lightHw: P.modelLightHw(model) });
   await txBulk(dev, wr, '配置', log);
-  log && log('in', 'Phase3 写每键颜色…');
-  await txBulk(dev, P.buildPerKey(keyColors), '每键', log);
+  log && log('in', 'Phase3 写每键颜色（SetGame cmd 02，R/G/B 三平面 378B）…');
+  await txBulk(dev, P.buildPerKey(keyColors, 126, gen !== 'fw26'), '每键', log);
   log && log('in', 'Phase4 保存…');
   await txRx(dev, P.buildSave(), log, 50);
   log && log('ok', '每键颜色已下发');
@@ -387,7 +392,7 @@ export async function hidApplyMacros(dev, macros, patchByLayer, slotCount, log, 
     await writeMatrix13(dev, layer, dwords, log);
     await sleep(50);
   }
-  log && log('ok', `下发完成（宏 ${count} 条，键位指派 ${assigned} 键）——回放由键盘固件执行，无需本页保持打开`);
+  log && log('ok', `下发完成（宏 ${count} 条，键位指派 ${assigned} 键）`);
   return { sent: true, assigned };
 }
 
@@ -565,53 +570,91 @@ export async function hidApplyMacrosWired(dev, macros, patchByLayer, slotCount, 
     `[有线] 完成：${stateTxt}，键位指派 ${assigned} 键（无已知保存命令，断电后是否保留未证实）`);
   return { sent: assigned > 0 || macroState === 'verified', assigned, macroState };
 }
-// 电量查询路径 ①（K65，fw26 世代；逆向自 K65 版 OemDrv CDevG5MS::GetPower @0x4946E0）：
-//   feat520 校验和布局帧（cmd@2、ck=Σ字节2..519）cmd=0x09 sub=0x01 len=1 → GetFeature(9)
-//   应答数据@偏移 8 共 1 字节 = 百分比，应答 buf[2] 回显 0x09。仅 k65 帧模式可用
-//  （LEOBOG fw24 不识别 cmd@2 布局，byte[1] 校验和会被当命令派发——严禁发给 fw24）。
-//   ×3 重试 / 60ms 间隔（驱动同款）。返回 { percent } 或 null。
-export async function hidReadBatteryWired(dev, log) {
-  if (getFeat520Mode() !== 'k65') {
-    log && log('er', '电量(GetPower)：仅 K65（fw26）帧模式支持——LEOBOG fw24 无此通道');
+// K65 电量接口的补充授权：定向 requestDevice，过滤器只匹配 FF01/0001（屏幕控制器集合，
+// feature report 10）。背景：新版浏览器选择器把整台设备合并成一行"已配对"，重新连接只会
+// 带回**当初授权过的接口集合**——早年为灯光/识别授权的集合里没有 FF01，电量接口就一直进
+// 不来；用 usage 过滤器定向请求，选择器会只列这一类接口，选中即永久并入本站授权。
+// 必须在用户手势内调用（查询按钮点击链路）。
+export async function requestBatteryIface(log) {
+  const filters = [];
+  for (const t of P.idsForChannel('any')) {
+    filters.push({ vendorId: t.vid, productId: t.pid, usagePage: 0xff01, usage: 0x0001 });
+  }
+  log && log('in', '请求补充授权电量接口（FF01 屏幕控制器集合，feature report 10）…');
+  let granted = [];
+  try {
+    granted = await navigator.hid.requestDevice({ filters });
+  } catch (e) {
+    log && log('er', '电量接口授权失败/取消: ' + e.message);
+    return [];
+  }
+  const opened = [];
+  for (const dev of granted ?? []) {
+    try {
+      if (!dev.opened) await dev.open();
+      const r = reportIds(dev);
+      const fmt = (a) => a.map((x) => x.toString(16)).join(',') || '-';
+      log && log('in', `电量接口已授权并打开（${dev.productName || 'Keyboard'}）报文 feat[${fmt(r.feature)}]`);
+      opened.push(dev);
+    } catch (e) { log && log('er', `打开电量接口失败: ${e.message}`); }
+  }
+  return opened;
+}
+
+// K65 电量候选判定（仅 fw26 路径使用）：返回该节点可用的电量 feature report id——
+//   10 = 顶层集合 FF01/0001（屏幕控制器，8B 完整寄存器）
+//    5 = 顶层集合 FF00/0001（6B 截短寄存器；该集合在 LEOBOG 世代是 GetPSD 通道，仅 K65
+//        上为电量——两条入口均为 2026-10-27 probe6 真机实测：裸 GetFeature 直接返回寄存器）
+//   0 = 非候选
+// 元数据只做候选筛选：浏览器持有的协议节点元数据看得到别家集合的 report id，但 Windows
+// 的 feature 请求按节点路由，不属于本节点的 id 必 STALL（真机两轮实证）——最终以实读
+// 成功为准（index.js readBatteryK65 逐节点尝试）。
+export function batteryReportOfK65(dev) {
+  try {
+    for (const c of dev?.collections ?? []) {
+      if (c.usagePage === 0xff01 && c.usage === 0x0001 && (c.featureReports ?? []).some((r) => r.reportId === 10)) return 10;
+      if (c.usagePage === 0xff00 && c.usage === 0x0001 && (c.featureReports ?? []).some((r) => r.reportId === 5)) return 5;
+    }
+  } catch { /* collections 解析异常视为非候选 */ }
+  return 0;
+}
+export const isBatteryIfaceK65 = (dev) => batteryReportOfK65(dev) !== 0;
+
+// 电量查询（K65/fw26）：屏幕控制器状态寄存器——feature report 10 直接 GetFeature（无需先发
+// 命令），布局见 protocol.js decodeBatteryK65。dev 必须声明 feature report 10（有线/无线键盘
+// 接口各有一个这样的 FF00/FF01 vendor 集合；readBattery 已按能力挑接口）。×3 重试。
+// 返回 { percent, voltage, charging }；非候选接口 / 读失败 / 魔数不符返回 null。
+export async function hidReadBatteryK65(dev, log, attempts = 3, reportId = 0) {
+  const rid = reportId || batteryReportOfK65(dev);
+  if (!rid) {
+    log && log('er', '电量(K65)：该接口顶层集合非 FF01/0001 或 FF00/0001（电量寄存器入口）');
     return null;
   }
-  const R = feat520Rid(dev);
-  const frame = P.buildFeat520FrameK65(P.BATTERY_CMD_K65, P.BATTERY_SUB_K65, 0, 1, null, 1);
-  for (let a = 0; a < 3; a++) {
+  for (let a = 0; a < attempts; a++) {
     try {
-      await dev.sendFeatureReport(R, frame.slice(1));
-      log && log('tx', `F${R} 520B[GetPower] [${R.toString(16)} ${frame[1].toString(16).padStart(2, '0')} 09 01 01 00 01 00 …]`);
-    } catch (e) {
-      log && log('er', `电量(GetPower) 发送失败: ${e.message}`);
-      return null;
-    }
-    await sleep(30);
-    try {
-      const dv = await dev.receiveFeatureReport(R);
+      const dv = await dev.receiveFeatureReport(rid);
       const b = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
-      log && log('rx', `F${R} ${P.hex(b.slice(0, 16))}${b.length > 16 ? ' …' : ''}`);
-      if (b[2] === P.BATTERY_CMD_K65 && b.length >= 9) {
-        const percent = b[8];
-        if (percent >= 0 && percent <= 100) {
-          log && log('ok', `电量 ${percent}%（GetPower cmd09/01，应答数据@8）`);
-          return { percent };
-        }
-        log && log('er', `电量应答值越界（${percent}），视为无效`);
+      log && log('rx', `F${rid.toString(16)} ${P.hex(b.slice(0, 8))}`);
+      const r = P.decodeBatteryK65(b);
+      if (r) {
+        log && log('ok', `电量 ${r.percent}%（${r.voltage.toFixed(2)}V${r.charging ? '，充电中' : ''}，屏幕控制器寄存器 report ${rid}）`);
+        return r;
       }
+      log && log('er', `电量寄存器魔数不符（${P.hex(b.slice(0, 8))}），重试…`);
     } catch (e) {
-      log && log('er', `电量(GetPower) GetFeature 失败: ${e.message}`);
+      log && log('er', `电量(K65) GetFeature(${rid}) 失败: ${e.message}`);
     }
-    await sleep(60);
+    await sleep(120);
   }
-  log && log('er', '电量查询无响应（键盘可能已休眠，按键唤醒后重试）');
+  log && log('er', `电量(K65)：该节点 report ${rid} 读取失败（元数据候选与实际路由不符属预期，换节点重试）`);
   return null;
 }
 
-// 电量查询路径 ②（LEOBOG 2.4G 接收器，0x13 cmd 0x4A）。响应 [0x13][0x4A][npkg][idx][oper|len=0x02][百分比][状态标志]…
+// 电量查询（LEOBOG 2.4G 接收器，0x13 cmd 0x4A）。响应 [0x13][0x4A][npkg][idx][oper|len=0x02][百分比][状态标志]…
 // 请求写入会先回一帧 echo（payload 全 0），以 byte[4]>0 或 byte[5]/byte[6]≠0 区分真实响应；
 // 键盘 2.4G 闲置快睡后通常无响应（需按键唤醒）→ 超时返回 null。
-// ⚠ 2026-10 K65 版驱动复核：0x4A 在该世代是 GetOnBoard（板载配置档号）而非电量——
-// 此路径仅维持 LEOBOG（fw24）历史行为，K65 走 hidReadBatteryWired（GetPower）。
+// ⚠ 仅限 LEOBOG（fw24）调用方：fw26（K65）无电量通道——2026-10 K65 版驱动复核，0x4A
+// 在该世代是 GetOnBoard（板载配置档号，CDev3632::GetOnBoard）而非电量，勿平移。
 export async function hidReadBattery(dev, log) {
   const req = P.buildFrame(P.CMD_BATTERY, 1, 0, new Uint8Array(15));
   await dev.sendReport(req[0], req.slice(1));
@@ -1303,36 +1346,28 @@ async function ensureWiredBanks(dev, isDefault, rgb, log) {
   }
 }
 
-// 有线每键涂色（自定义模式）：读 8a 表 → 按矩阵号填 [21+3m] 三元组 → cmd 0a 写回。
-// ledMap 为空 = 清除涂色（每键区整片清零）。矩阵号 = 固件 LED 索引（KB.ini matrix 列，
-// 全型号最大 112 < 表容量）。使用已验证的写变体（d4/400/40），失败回退 00/200/01。
-// opts.crc（K65）：同 hidSetColorWired——8a 读回仅 144B，读改写会把 [144..399] 清零，
-//   改为构造完整 512B 表（涂色槽 + 其余零 + 5a a5 尾）官方式直写。
+// 有线每键涂色（自定义模式）。ledMap: {矩阵槽: [r,g,b]}，矩阵号 = 固件 LED 索引。
+// opts.crc（K65）——官方 SetGame 通道（2026-10-18 K65 版 OemDrv REA，CDevG5KB::SetGame =
+// feat520 cmd 06 / sub=色组号 / len=378）：载荷 = R/G/B 三平面 × 126B（GameRGBIndex=0,1,2 正序，
+// plane[矩阵槽] = 色字节）。**早前按 8a 表 [21+3m] 写 cmd 0x0A 是布局误读**——该表是 19 效果 ×
+// 7 色槽的效果色表（SetLedRgbTab 专用，切效果时才写），把每键色灌进去固件根本不读，
+// 即有线自定义模式不生效的根因。平面仓库无读回命令，发送即生效（断电恢复，无保存命令已知）。
 export async function hidSetPerKeyWired(dev, ledMap, log, opts = {}) {
   const entries = Object.entries(ledMap);
   log && log('in', '[有线] 每键涂色：' + entries.length + ' 键' + (entries.length ? '' : '（清除整片）'));
   if (opts.crc) {
-    const tab = new Uint8Array(0x200);
+    const tab = new Uint8Array(378); // R@0..125 | G@126..251 | B@252..377
+    let n = 0;
     for (const [m, rgb] of entries) {
-      const off = 21 + 3 * (+m);
-      if (off + 2 > 419) continue;
-      tab[off] = rgb[0]; tab[off + 1] = rgb[1]; tab[off + 2] = rgb[2];
+      const i = +m;
+      if (i < 0 || i >= 126) continue;
+      tab[i] = rgb[0]; tab[126 + i] = rgb[1]; tab[252 + i] = rgb[2];
+      n++;
     }
-    tab[506] = 0x5a; tab[507] = 0xa5;
     try {
-      await feat520Exchange(dev, 0x0a, 0x00, 0, 0x200, tab, log, null, 0x01);
-    } catch (e) { log && log('er', '[有线] 涂色全表直写失败: ' + e.message); return false; }
-    await sleep(20);
-    try {
-      const chk = await feat520Exchange(dev, 0x8a, 0, 0, 0x190, null, log);
-      if (chk.length >= 32) {
-        const now = chk.slice(P.FEAT520_DATA_OFF, P.FEAT520_DATA_OFF + 0x90);
-        const want = entries.filter(([m]) => 21 + 3 * (+m) + 2 < 0x90);
-        const hit = want.filter(([m, c]) => now[21 + 3 * m] === c[0] && now[22 + 3 * m] === c[1] && now[23 + 3 * m] === c[2]).length;
-        log && log(hit === want.length ? 'ok' : 'warn', `✓ [有线] 每键涂色已写入（144B 窗口 ${hit}/${want.length} 键命中；未保存，断电恢复）`);
-        return true;
-      }
-    } catch { /* 读回不可用则按已发送计 */ }
+      await feat520Exchange(dev, 0x06, 0x00, 0, 378, tab, log, null, 0x01);
+    } catch (e) { log && log('er', '[有线] 每键三平面（SetGame cmd 06）发送失败: ' + e.message); return false; }
+    log && log('ok', `✓ [有线] 每键涂色已写入（SetGame cmd 06/组0，${n} 键；未保存，断电恢复）`);
     return true;
   }
   const table = await readRgbTable(dev, log);

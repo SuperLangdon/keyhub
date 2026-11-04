@@ -1,10 +1,10 @@
 // 全局状态 + localStorage 持久化
-import { L } from './i18n.js';
+import { t } from './i18n.js';
 
 // 构建标记：由 tools/bump-build.mjs 生成（git 短哈希 + 日期），改 js 后跑一次脚本——
 // 日志/诊断包引用它核对浏览器是否拿到最新代码（避免模块缓存误导调试）。
 // （原定义于 main.js，迁此供 device 层诊断包引用且不引入循环依赖）
-export const BUILD = '2026-10-18.367e861+reenter';
+export const BUILD = '2026-11-04.18abd83';
 
 const LS_KEY = 'leobog-web-v1'; // 历史键名（更名 KeyHub 前沿用）：不改名，保住老用户的 localStorage 数据
 
@@ -42,6 +42,7 @@ export function defaultCfg(model) {
     layers.push(m);
   }
   return {
+    lightOn: true,     // 灯光总开关：先开灯才能设特效（「关闭」不再作为效果档）
     effectUi: ledUiByIndex(model, model.defLedIndex) ?? 1,
     color: [255, 0, 0],
     colorful: false,
@@ -99,7 +100,7 @@ const isPlainObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 // 宏 id：保留文件内合法且唯一的 id（键位指派按 id 引用），仅把缺失/重复的换成新号。
 export function importAll(json) {
   const data = JSON.parse(json);
-  if (data.app !== 'keyhub' && data.app !== 'leobog-web') throw new Error(L('不是本应用的配置文件', 'Not a profile exported from this app'));
+  if (data.app !== 'keyhub' && data.app !== 'leobog-web') throw new Error(t('app.settings.notAppProfile'));
   let cfgN = 0, dropped = 0;
   if (isPlainObj(data.cfgs)) {
     for (const [slug, cfg] of Object.entries(data.cfgs)) {
@@ -145,5 +146,10 @@ export function loadCfgFor(slug, model) {
   state.slug = slug;
   state.model = model;
   state.cfg = state.cfgs[slug] || defaultCfg(model);
+  // 旧版配置把「关闭」存成效果档（effectUi = LedOpt 关闭行，fw=0）；新版改为 lightOn
+  // 总开关——老数据无此字段，按旧档位换算一次（存过关闭档 → 关，其余 → 开）
+  if (state.cfg.lightOn === undefined) {
+    state.cfg.lightOn = model.ledopts.find((x) => x.fw === 0)?.ui !== state.cfg.effectUi;
+  }
   setCfg(state.cfg);
 }

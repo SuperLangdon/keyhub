@@ -18,6 +18,12 @@ export function devLog(kind, msg) {
   const entry = { time, kind, msg };
   logBuf.push(entry);
   if (logBuf.length > LOG_CAP) logBuf.shift();
+  // 镜像到浏览器控制台（tx/rx 帧流除外——屏幕烧录一次上千帧会刷爆 DevTools）。
+  // 主页上应用内 HID 面板不可见，自动重连等启动期日志只有 F12 控制台能看到。
+  if (kind !== 'tx' && kind !== 'rx') {
+    const fn = kind === 'er' ? 'error' : kind === 'warn' ? 'warn' : 'log';
+    console[fn](`[HID ${time}] ${msg}`);
+  }
   logListeners.forEach((fn) => fn(entry));
 }
 export function onDevLog(fn) { logListeners.add(fn); }
@@ -66,6 +72,7 @@ export const device = {
   mode: 'sim',
   dev: null,
   hidDevs: [],
+  batteryResult: null, // 会话内缓存（同 fwVersion）：最近一次成功读到的电量结果，设置页渲染直接显示
 
   // 型号协议配置：K65（fw≠24）的 520B 有线通道固定走 report 9（帧布局与 LEOBOG 相同，
   // 真机实证 2026-10），LEOBOG 全系 fw24 走 report 6。进入型号会话时调用（enterApp）。
@@ -113,6 +120,12 @@ export const device = {
     return null;
   },
 
+  // 会话是否持有有线接口（USB 直连的键盘本体）。主接口可能是 2.4G 接收器（灯光路由偏向
+  // out[13] 接口），屏幕等仅有线通道的功能按「会话里有没有有线接口」判，而非只看主接口。
+  hasWiredIface() {
+    return (this.hidDevs ?? []).some((d) => this.channelOf(d) === 'wired');
+  },
+
   // 固件版本（只读，逆向确证）：官方驱动的「固件版本 V20.0.8」= USB **bcdDevice** ——
   // OemDrv 各 FindHIDDevice 调 HidD_GetAttributes 取 VersionNumber(WORD) 存 m_nVer，
   // 显示格式 "%s V%X.%X.%X"（>>8 整字节 / (>>4)&0xF / &0xF，bcdDevice 0x2008 → V20.0.8）。
@@ -141,6 +154,7 @@ export const device = {
       // 段按驱动同款 %X 十六进制展示（0x2008 的 major 段 = 0x20 → "20"）
       const text = `V${segs[0].toString(16).toUpperCase()}.${segs[1].toString(16)}.${segs[2].toString(16)}`;
       devLog('ok', `固件版本 ${text}（bcdDevice=${raw}，${name}）`);
+      this.fwVersion = text; // 会话内缓存：设置页首次渲染即可直接显示
       return text;
     } catch (e) {
       if (interactive) devLog('er', '固件版本查询失败: ' + e.message);
@@ -148,29 +162,151 @@ export const device = {
     }
   },
 
-  // 电量：按型号代际选择通道（2026-10 K65 版驱动 REA）：
-  //   fw26（K65）→ GetPower（feat520 校验和帧 cmd 09/01，应答数据@8；仅 k65 帧模式），
-  //                有线/无线连接都走同一 feat520 接口（官方驱动仅在无线连接时查询，有线恒显 100%）
-  //   fw24（LEOBOG）→ 0x13 cmd 0x4A（仅 2.4G 接收器通道应答；注意 0x4A 在 fw26 语义是板载档号）
-  // 返回 {percent}；未连接 / 无响应 / 休眠返回 null
-  async readBattery() {
-    return lock(async () => {
-    if (this.mode !== 'hid' || !this.dev?.opened) return null;
-    const { model } = state;
-    // GetPower（fw26）只发给 VID/PID 与该型号匹配的设备——连接向导的电量角标可能在
-    // 型号会话之外触发，state.model 未必对应眼前这台键盘
-    const matchesModel = model && [[model.vid, model.pid], [model.vidW, model.pidW]]
-      .some(([v, p]) => v != null && this.dev?.vendorId === v && this.dev?.productId === p);
-    if (model && P.cfgGenOf(model) === 'fw26' && matchesModel) {
-      // GetPower 需要 feat520（report 6/9 任一）；主接口没有则试其它已授权接口
-      const dev = [this.dev, ...(this.hidDevs ?? [])].find((d) => d?.opened && (H.hasFeatureReport(d, 6) || H.hasFeatureReport(d, 9)));
-      if (dev) { try { return await H.hidReadBatteryWired(dev, devLog); } catch (e) { devLog('er', '电量(GetPower): ' + e.message); return null; } }
-      devLog('er', '电量(GetPower)：已授权接口无 520B feature 通道（report 6/9）');
+  // 连接成功的用户手势链内补拿 WebUSB 授权：bcdDevice 只能经 WebUSB 读，而其授权与
+  // WebHID 相互独立、requestDevice 必须由用户手势触发——错过手势链就只能退回设置页
+  // 手动点查询。授权一次即持久，此后设置页进页静默回填固件版本（无需任何点击）。
+  // 用户取消 / 无手势 / 失败一律静默放弃，保留设置页手动查询兜底。
+  async ensureFwGrant() {
+    if (!navigator.usb || this.mode !== 'hid' || !this.dev) return;
+    const { vendorId: vid, productId: pid } = this.dev;
+    try {
+      const have = (await navigator.usb.getDevices())
+        .some((d) => d.vendorId === vid && d.productId === pid);
+      if (have) return; // 已授权：静默回填链路已通，不重复弹窗
+      await navigator.usb.requestDevice({ filters: [{ vendorId: vid, productId: pid }] });
+      devLog('ok', 'WebUSB 已授权：设置页固件版本将自动回填');
+    } catch { /* 取消等：手动查询按钮兜底 */ }
+  },
+
+  // 电量：按型号代际选通道——
+  //   fw26（K65）→ 屏幕控制器状态寄存器（feature report 10，有线/无线接口均可读，见
+  //                webhid hidReadBatteryK65；官方驱动对键盘从不查电量，此为真机定位的固件通道）
+  //   fw24（LEOBOG）→ 0x13 cmd 0x4A（仅 2.4G 接收器应答；该世代 0x4A 才是电量）
+  // 返回 {percent[, voltage, charging]}；未连接 / 无通道 / 无响应返回 null
+  async readBattery(opts = {}) {
+    // K65/fw26 电量寄存器（FF01/0001 顶层集合，feature report 10）：Windows 按顶层集合
+    // 拆节点，feature 请求只在本节点集合生效；FF01 usage 在描述符里顶层+嵌套各一份，
+    // 元数据会匹配到不可读的嵌套节点（2026-10-27 真机两轮实证：GetFeature ×3 STALL 且
+    // 补充授权被元数据短路）。因此不做元数据单点选择：① 对已授权候选节点各实读 1 次
+    //（先成功者胜）→ ② 仍无读数且在用户手势内（设置页/调试台按钮）→ 定向补充授权
+    // FF01 顶层节点（选择器只列该接口）→ ×3 重读。授权一次后浏览器永久记住。
+    if (this.mode === 'hid' && state.model && P.cfgGenOf(state.model) === 'fw26') {
+      // ① WebHID feature 快扫（按集合授权的旧版 Chrome 可用）
+      let r = await lock(() => this.readBatteryK65(1));
+      // ② WebUSB 控制传输 GET_REPORT（若 Chrome 允许类传输到未 claim 接口）
+      if (!r) r = await this.readBatteryUsbK65();
+      if (r) { this.batteryResult = r; return r; }
+      // 2026-10-27 定论（四条浏览器通道全灭，逐条有拒绝证据）：WebHID feature 被整设备
+      // 合并授权的节点路由挡死（元数据可见但读必 STALL）；0x13 无电量命令（0x04-0x9F
+      // 全扫）；WebUSB claim 被拒（HID 接口属受保护类）；设备收件人类传输 not allowed。
+      // 寄存器本身正常（原生 report 10/5 可读 4.00V+充电位）——浏览器限制，非设备故障。
+      devLog('er', '电量(K65)：此浏览器读不到（Chrome 整设备授权路由 + WebUSB 保护策略，四路均拒）——寄存器正常，非设备故障；详见调试台逐条证据');
       return null;
     }
-    if (this.channelOf(this.dev) !== 'wireless') return null;
-    try { return await H.hidReadBattery(this.dev, devLog); } catch { return null; }
+    // fw24（LEOBOG）：0x13 cmd 0x4A，仅 2.4G 接收器应答
+    return lock(async () => {
+      if (this.mode !== 'hid' || !this.dev?.opened) return null;
+      if (this.channelOf(this.dev) !== 'wireless') return null;
+      try {
+        const r = await H.hidReadBattery(this.dev, devLog);
+        if (r) this.batteryResult = r;
+        return r;
+      } catch { return null; }
     });
+  },
+
+  // K65 电量实读：对全部候选节点（顶层 FF01/0001+feat10 或 FF00/0001+feat5）逐个尝试，
+  // 先成功者胜。attempts 为单节点重试次数（快速探测 1 次 / 补授权后 3 次）。需在 lock 内调用。
+  async readBatteryK65(attempts) {
+    const devs = [this.dev, ...(this.hidDevs ?? [])].filter((d) => d?.opened && H.isBatteryIfaceK65(d));
+    if (!devs.length) {
+      devLog('er', '电量(K65)：已授权接口中无电量寄存器入口（FF01/0001 或 FF00/0001 顶层集合）');
+      return null;
+    }
+    for (const d of devs) {
+      const rid = H.batteryReportOfK65(d);
+      try { const r = await H.hidReadBatteryK65(d, devLog, attempts, rid); if (r) return r; } catch (e) { devLog('er', '电量(K65): ' + e.message); }
+    }
+    return null;
+  },
+
+  // K65 电量兜底：WebUSB 控制传输 GET_REPORT(feature)。背景（2026-10-27 真机+日志实证）：
+  // Chrome 新版把整台键盘的多个顶层集合合并为一个 HIDDevice，collections 元数据看得到
+  // FF01/FF00 电量集合，但 feature 请求绑定在首个节点句柄上，report 5/6/10 全部 STALL——
+  // WebHID feature 路对这类设备整体不可达。WebUSB 走端点 0 的类请求 GET_REPORT（wValue=
+  // (Feature<<8)|reportId, wIndex=HID 接口号）绕开节点路由；WebUSB open 已可行（固件版本
+  // 查询同路）。需 WebUSB 授权（与 WebHID 独立；设置页固件版本「查询」一次即可授权）。
+  async readBatteryUsbK65() {
+    if (!navigator.usb) return null;
+    const filters = P.idsForChannel('any').map(({ vid, pid }) => ({ vendorId: vid, productId: pid }));
+    let usb;
+    try {
+      usb = (await navigator.usb.getDevices()).find((d) => filters.some((f) => d.vendorId === f.vendorId && d.productId === f.productId));
+    } catch { return null; }
+    if (!usb) {
+      devLog('er', '电量(K65)：WebUSB 未授权——设置页点固件版本「未查询」授权一次后，电量即可走控制传输兜底');
+      return null;
+    }
+    try {
+      if (!usb.opened) await usb.open();
+      const tryGet = async (recipient, rid, len, idx) => {
+        const res = await usb.controlTransferIn({ requestType: 'class', recipient, request: 0x01, value: (0x03 << 8) | rid, index: idx }, len);
+        if (res.status === 'ok' && res.data?.byteLength) {
+          const b = new Uint8Array(res.data.buffer, res.data.byteOffset, res.data.byteLength);
+          devLog('rx', `USB GET_REPORT(feat ${rid}, ${recipient} if${idx}) ${P.hex(b)}`);
+          const r = P.decodeBatteryK65(b);
+          if (r) {
+            devLog('ok', `电量 ${r.percent}%（${r.voltage.toFixed(2)}V${r.charging ? '，充电中' : ''}，WebUSB 控制传输）`);
+            return r;
+          }
+          devLog('er', `USB GET_REPORT(feat ${rid}, ${recipient} if${idx}) 应答魔数不符`);
+        } else {
+          devLog('er', `USB GET_REPORT(feat ${rid}, ${recipient} if${idx}) status=${res.status}`);
+        }
+        return null;
+      };
+      try {
+        // A. 设备收件人变体（无需 claim；8051 固件 ep0 处理常忽略 recipient 位只看 bRequest/wValue）
+        for (const [rid, len] of [[10, 8], [5, 6]]) {
+          for (const idx of [1, 0]) {
+            try { const r = await tryGet('device', rid, len, idx); if (r) return r; }
+            catch (e) { devLog('er', `USB GET_REPORT(feat ${rid}, device if${idx}) 失败: ${e.message}`); }
+          }
+        }
+        // B. 接口收件人（Chrome 要求先 claim；Windows 上接口被 HID 驱动占用多半 claim 失败，无害一试）
+        let claimed = -1;
+        for (const idx of [1, 0]) {
+          try { await usb.claimInterface(idx); claimed = idx; break; }
+          catch (e) { devLog('er', `USB claim(if${idx}) 失败: ${e.message}`); }
+        }
+        if (claimed >= 0) {
+          try {
+            for (const [rid, len] of [[10, 8], [5, 6]]) {
+              try { const r = await tryGet('interface', rid, len, claimed); if (r) return r; }
+              catch (e) { devLog('er', `USB GET_REPORT(feat ${rid}, interface if${claimed}) 失败: ${e.message}`); }
+            }
+          } finally { try { await usb.releaseInterface(claimed); } catch { /* ignore */ } }
+        }
+      } finally { try { await usb.close(); } catch { /* ignore */ } }
+    } catch (e) { devLog('er', '电量(K65) WebUSB: ' + e.message); }
+    return null;
+  },
+
+  // 追加合并接口（电量补充授权等场景）：去重并入 hidDevs 并补挂 disconnect 监听，
+  // 断开时统一走 disconnect() 清理
+  addIfaces(devs) {
+    if (this.mode !== 'hid') return;
+    const cur = this.hidDevs?.length ? [...this.hidDevs] : (this.dev ? [this.dev] : []);
+    for (const d of devs ?? []) {
+      if (!d?.opened || cur.includes(d)) continue;
+      cur.push(d);
+      if (!d.__khDiscWired) {
+        d.__khDiscWired = true;
+        d.addEventListener('disconnect', () => this.disconnect());
+      }
+      devLog('in', `接口已并入会话（现共 ${cur.length} 个）：${d.productName || 'Keyboard'}`);
+    }
+    this.hidDevs = cur;
   },
 
   // 型号识别（GetPSD，report ID 0x05），单个接口。返回 { psd, reason }，见 webhid.js readPsd。
@@ -265,7 +401,8 @@ export const device = {
   },
   async applyLightInner(cfg, model) {
     const isCustom = cfg.effectUi === 19;   // FX_CUSTOM_UI（注入的自定义槽）
-    const isOff = cfg.effectUi === 21;      // 原生 LedOpt19 行（首列 21/fw 0），UI 呈现为关闭
+    // 总开关关灯 = SW0；effectUi 遗留旧「关闭档」（fw=0 行）时同样按关灯下发
+    const isOff = cfg.lightOn === false || isOffUi(model, cfg.effectUi);
     // 效果字节 = UI 号（两代同域）。§11.5 曾改为 fw 固件号——系 LedOpt 行布局偏移读错
     //（行实为 [使能,fw,ui,...]，驱动 FillCfgB 取行+2=ui 列）；真机大规模错乱后回滚，
     // 并由真机现象反证固件效果域确为 UI 1-18（LedMask 隐藏的 6/14/18 固件没有）+21+0。
@@ -334,7 +471,8 @@ export const device = {
     const selfFw = selfDefineFw(model);
     if (this.mode === 'hid' && this.dev?.opened) {
       if (!this.canSend13()) {
-        // 有线：配置置自定义 SW21（colorMode=1，镜像无线 hidApplyPerKey）+ 8a 表按矩阵填色
+        // 有线：配置置自定义 SW21（fw26 连带 blob[9]=1 开关、blob[11]=0x20 色组 0、blob[94/95] 参数对）
+        // + SetGame 三平面按矩阵填色（cmd 06/组0，2026-10-18 驱动 REA 的官方通道）
         try {
           await H.hidApplyEffectWired(this.dev, 21, {
             brightness: cfg.brightness ?? 3, speed: cfg.speed ?? 2,
@@ -361,12 +499,15 @@ export const device = {
   // keyinfo_to_hardware_code@0x491f90（2026-10 REA 复核）。无编码的指派跳过并计数。
   // 键位槽位用 model.keys[].matrix（驱动按 KB.ini 每键 matrix 寻址，BuildMacroBlob 实证；
   // K 序号≠槽位——Hi75 K1→槽0、K2→槽12，此前按 K 序号直索引是错位 bug，2026-10 修正）。
-  async applyMacros() {
-    return lock(() => this.applyMacrosInner());
+  // opts.keysOnly（按键页「写入键盘」）：只写键位指派、不重发宏内容——宏 blob 可达 10KB，
+  // 重发既慢又会把本页管不到的宏变更带进去；两条通道的键位读改写与宏内容本就相互独立。
+  async applyMacros(opts = {}) {
+    return lock(() => this.applyMacrosInner(opts));
   },
-  async applyMacrosInner() {
+  async applyMacrosInner(opts = {}) {
     const { model, cfg } = state;
     const macros = state.macros;
+    const txMacros = opts.keysOnly ? [] : macros;
     if (!model || !cfg) return { error: 'no-model' };
     if (!model.keys?.length) { devLog('er', '未加载型号（键位槽未知），无法下发改键'); return { error: 'no-model' }; }
     // 键 → 固件矩阵槽位；槽数 = max(matrix)+1（Hi75 为 90 槽 > 键数 82——旋钮等占位）
@@ -394,15 +535,15 @@ export const device = {
         devLog('er', '当前接口既无 0x13 输出报文（2.4G）也无 520B 特征帧（有线 report 6/9）——请重新连接设备');
         return { error: 'no-channel' };
       }
-      if (!macros.length && !any) {
-        devLog('in', '没有可下发的指派，无事可做');
-        return { sent: false };
+      if (!txMacros.length && !any) {
+        devLog('in', `没有可下发的指派，无事可做${skipped.length ? `（跳过 ${skipped.length} 项无固件编码：${skipped.join('、')}）` : ''}`);
+        return { sent: false, nothing: true };
       }
       // 容量拦截（原驱动同款，双层上限）：打包 blob 超 KB.ini MacroBufferSize（K65 缺省 4096，
       // 驱动打包器实际生效的上限）或驱动静态数组硬上限 0x2800 直接拒绝，别让固件截断
-      if (macros.length) {
+      if (txMacros.length) {
         const cap = Math.min(model.macroBufferSize ?? H.MACRO_DRIVER_LIMIT, H.MACRO_DRIVER_LIMIT);
-        const { blob } = P.buildMacroBlob(macros);
+        const { blob } = P.buildMacroBlob(txMacros);
         if (blob.length > cap) {
           devLog('er', `宏打包 ${blob.length}B 超过原驱动上限 ${cap}B——请删减宏/事件后重试`);
           return { error: 'too-big', size: blob.length };
@@ -420,10 +561,10 @@ export const device = {
         let res;
         if (this.canSend13()) {
           // 2.4G 无线通道：0x13 协议（宏内容 cmd 0x03 + 键位 0x41/0x01）
-          res = await H.hidApplyMacros(this.dev, macros, patchByLayer, slotCount, devLog, mOpts);
+          res = await H.hidApplyMacros(this.dev, txMacros, patchByLayer, slotCount, devLog, mOpts);
         } else {
           // 有线通道：520B 特征帧（键位读 cmd 83 / 写 cmd 03，宏写 cmd 05——逆向自 CDevG5KB）
-          res = await H.hidApplyMacrosWired(this.dev, macros, patchByLayer, slotCount, devLog, mOpts);
+          res = await H.hidApplyMacrosWired(this.dev, txMacros, patchByLayer, slotCount, devLog, mOpts);
         }
         // 旋钮模式联动（型号过滤：KB.ini WheelMode>0 才有；驱动 FillCfg Cfg[26]=nWheelMode——
         // 旋钮键被改键→6=固件当普通键，否则 0。KnobIndex 为 0 基，K 表 1 基 +1）
@@ -442,12 +583,14 @@ export const device = {
       }
     }
     // 模拟模式：演示打包结果
-    const { blob, count } = P.buildMacroBlob(macros);
-    devLog('in', `[模拟] 宏下发：${count} 条 / ${blob.length}B（cmd 0x03 ×${Math.ceil(blob.length / P.MACRO_CHUNK)} 块）`);
+    if (txMacros.length) {
+      const { blob, count } = P.buildMacroBlob(txMacros);
+      devLog('in', `[模拟] 宏下发：${count} 条 / ${blob.length}B（cmd 0x03 ×${Math.ceil(blob.length / P.MACRO_CHUNK)} 块）`);
+      devLog('tx', `blob 头 32B: ${P.hex(blob.subarray(0, 32))}`);
+    }
     const parts = Object.entries(patchByLayer).map(([l, k]) => `层${l}×${Object.keys(k).length}键`);
     if (parts.length) devLog('in', `[模拟] 指派：${parts.join(' ')}`);
     if (skipped.length) devLog('in', `[模拟] 跳过：${skipped.join('、')}`);
-    devLog('tx', `blob 头 32B: ${P.hex(blob.subarray(0, 32))}`);
     return { sent: false, sim: true };
   },
 
@@ -600,19 +743,21 @@ export const device = {
     return this.readPsdAny();
   },
 
-  // 电量：fw26（K65）走 GetPower（feat520，两通道皆可）；fw24 走 0x4A（仅 2.4G 接收器应答）
+  // 电量探针：fw26（K65）读屏幕控制器寄存器（report 10，两通道皆可）；fw24 走 0x13 cmd 0x4A
+  //（仅 2.4G 接收器应答）
   async probeBattery() {
     if (this.mode !== 'hid') { devLog('er', '探针需要真机模式'); return; }
     const { model } = state;
     if (model && P.cfgGenOf(model) === 'fw26') {
-      devLog('in', '探针 · 电量查询（GetPower cmd 09/01，feat520 通道）…');
-    } else {
-      if (this.channelOf(this.dev) !== 'wireless') {
-        devLog('warn', '该型号电量查询走 0x13 cmd 0x4A——仅 2.4G 无线通道应答（有线连接无响应）');
-        return;
-      }
-      devLog('in', '探针 · 电量查询（0x4A）…');
+      devLog('in', '探针 · 电量查询（K65 屏幕控制器寄存器，report 10/5 + WebUSB 兜底）…');
+      await this.readBattery();
+      return;
     }
+    if (this.channelOf(this.dev) !== 'wireless') {
+      devLog('warn', '该型号电量查询走 0x13 cmd 0x4A——仅 2.4G 无线通道应答（有线连接无响应）');
+      return;
+    }
+    devLog('in', '探针 · 电量查询（0x4A）…');
     await this.readBattery();
   },
 

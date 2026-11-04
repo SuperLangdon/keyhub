@@ -271,16 +271,51 @@ export function padMatrixDwords(dwords, matrixLen, crc) {
   return out;
 }
 
-// ---------- 电量查询（K65 版 OemDrv 2026-10 REA 实证）----------
-// CDevG5MS::GetPower @0x4946E0：feat520 **report 9 + 校验和布局**（cmd@2 + ck=Σ字节2..519，
-// 即 buildFeat520FrameK65）：[09][ck][cmd=0x09][sub=0x01][块数=01][seq=00][len=01][00]。
-// 应答 HidD_GetFeature(9)：数据@偏移 8 共 1 字节 = 电量百分比，应答 buf[2] 须回显 cmd 0x09；
-// ×3 重试，间隔 60ms。仅无线连接时驱动调用（SyncCfg 通道==2；有线恒显 100%）。
-// 走 usagePage 0xFF02/usage 2 的 vendor collection（与灯光 feat520 同一 520B feature 能力）。
-// 注意：0x13 cmd 0x4A 在本代驱动是 GetOnBoard（板载配置档号，CDev3632::GetOnBoard @0x48a310
-// SendCMD(74,0,&v,1)），不是电量——LEOBOG 世代的 0x4A 电量结论不能平移到 K65。
-export const BATTERY_CMD_K65 = 0x09;
-export const BATTERY_SUB_K65 = 0x01;
+// ---------- 电量（K65/fw26，2026-10-27 真机定位）----------
+// 官方驱动四个键盘类（G5KB/3632/916KB/ComboFilm-键盘路径）的 GetPower 虚表槽全部是
+// return 0 空桩（仅鼠标类 G5MS 实现），驱动对 K65 恒显 100%；feat520 cmd 09/89 在 K65
+// 有线固件上是存储器读取族（0x81=描述符块、0x8E/0x8F=8051 固件代码块，真机 dump 实证），
+// 与电量无关；0x13 在无线键盘上只有 cmd 07 链路探测有应答。
+// 真正可读的电量 = **屏幕控制器状态寄存器**：feature report 10（FF00/FF01 vendor 集合，
+// 有线/无线键盘接口各声明一个，Win32 HidD_GetFeature 与 WebHID receiveFeatureReport 均可
+// 直接读，无需先发命令）。8 字节布局（跨日多次读取逐字节稳定；插拔 USB 观察）：
+//   [0]=0x06 [1]=电池电压(25mV 单位，0xA0=160 → 4.00V) [2]=状态位(bit1=充电中：插 USB 00→02)
+//   [3]=0xA5 [4..5]=9B 89 [6]=0x28 [7]=0x00
+// 实测 4.00V ↔ 屏幕电量四格（5 格制 ≈ 80%）相互印证。注意应答**不回显 report id**——
+// 读回缓冲首字节即 0x06（Chrome receiveFeatureReport(10) 返回的就是这 8 字节）。
+export const BATTERY_REPORT_K65 = 10;
+// 第二电量入口（2026-10-27 probe6 实测）：FF00/0001 集合的 feature report 5 直接
+// GetFeature 返回同一寄存器的前 6 字节 [06 电压 充电位 A5 9B 89]（无 [6][7]）——
+// 该集合同时是 LEOBOG 世代的 GetPSD 通道，仅 fw26（K65）路径按寄存器解码。
+export const BATTERY_REPORT_K65_ALT = 5;
+// 1S 锂电电压 → 百分比分段线性表（3.35V 以下 0，4.20V 以上 100）。屏幕格数阈值未取得，
+// 此 LUT 为标准锂电放电曲线近似（±5%）——待真机放电过程校准后修正。
+export const BATT_VOLT_LUT_K65 = [
+  [3.35, 0], [3.5, 10], [3.6, 20], [3.68, 30], [3.74, 40], [3.79, 50],
+  [3.83, 60], [3.87, 70], [3.92, 80], [3.98, 90], [4.06, 95], [4.2, 100],
+];
+export function decodeBatteryK65(b) {
+  if (!b) return null;
+  // 两种布局（2026-10-27 真机实证）：固件应答不回显真 report ID，首字节是寄存器魔数 0x06——
+  //   原生（HidD_GetFeature 原始缓冲）: [06][volt][status][A5][9B][89](+[28][00])
+  //   WebHID（Chrome receiveFeatureReport 剥离首字节当 report ID 丢弃，0x06 恰被吃掉）:
+  //     [volt][status][A5][9B][89](+[28][00]) —— 整体左移一位
+  let f = null;
+  if (b.length >= 6 && b[0] === 0x06 && b[3] === 0xa5 && b[4] === 0x9b && b[5] === 0x89) f = b;
+  else if (b.length >= 5 && b[2] === 0xa5 && b[3] === 0x9b && b[4] === 0x89) f = [0x06, b[0], b[1], b[2], b[3], b[4]];
+  if (!f) return null;
+  const volt = f[1] * 0.025;
+  if (volt < 2.5 || volt > 5.0) return null; // 物理域防护（坏读数/误解码）
+  const lut = BATT_VOLT_LUT_K65;
+  let pct = volt >= lut[lut.length - 1][0] ? 100 : 0;
+  for (let i = 0; i < lut.length - 1; i++) {
+    if (volt < lut[i + 1][0]) {
+      pct = Math.round(volt <= lut[i][0] ? lut[i][1] : lut[i][1] + (volt - lut[i][0]) / (lut[i + 1][0] - lut[i][0]) * (lut[i + 1][1] - lut[i][1]));
+      break;
+    }
+  }
+  return { percent: pct, voltage: Math.round(volt * 1000) / 1000, charging: !!(f[2] & 0x02) };
+}
 
 // 通用分片帧：把任意数据按 tag 打包成 0x13 帧（对应驱动 Send13 的循环体）
 export function buildTaggedFrames(cmd, tag, data) {
@@ -551,6 +586,10 @@ export function effectTableLoc(n) {
   if (n >= 1 && n <= 6) return [4, 7 + (n - 1) * 2];
   if (n >= 7 && n <= 13) return [5, 5 + (n - 7) * 2];
   if (n >= 14 && n <= 18) return [6, 5 + (n - 14) * 2];
+  // 自定义（Gaoshou）行 = LedOpt 第 19 行（0 基行 18）：参数对在 blob[94]/[95] = 帧6 f[15]/f[16]
+  //（2026-10-18 K65 版 OemDrv FillCfg 0x491430 的 19 行循环实证；此前落入默认 [4,7]=blob[63]，
+  // 把自定义档的亮度/速度错写进效果 3 的速度槽/效果 4 的亮度槽）
+  if (n === 21) return [6, 15];
   return [4, 7];
 }
 
@@ -697,8 +736,13 @@ export function buildPalette(colorRgb) {
   return frames;
 }
 
-// 每键 RGB（28 片：R/G/B 三平面 × 9 + 尾片）。keyColors: {ledIndex: [r,g,b]}
-export function buildPerKey(keyColors, maxLed = 126) {
+// 每键 RGB（R/G/B 三平面 × 126B = 378B → 27 片；withTail=false 再无尾片）。
+// keyColors: {ledIndex: [r,g,b]}，ledIndex = 矩阵槽（驱动 ApplySetting 按键结构 +13 取矩阵号
+// 写 plane[矩阵号]，三平面字节序由 KB.ini GameRGBIndex 决定，K65=0,1,2 正序）。
+// 尾片 [06 00 00 5a a5] 系 AULA/fw24 时代产物：官方 CDev3632::SetGame = Send13(cmd 0x02,
+// tag=色组号) 把 378B 纯数据按 14B 分片，恰好 27 片、**无任何尾片**（2026-10-18 K65 版
+// OemDrv sub_489A00 实证）。fw24（LEOBOG）保留 28 片历史行为（真机验证过，不动）。
+export function buildPerKey(keyColors, maxLed = 126, withTail = true) {
   const R = new Uint8Array(maxLed), G = new Uint8Array(maxLed), B = new Uint8Array(maxLed);
   for (const [idx, rgb] of Object.entries(keyColors)) {
     const i = +idx;
@@ -714,9 +758,14 @@ export function buildPerKey(keyColors, maxLed = 126) {
       frames.push(buildFrame(CMD_PERKEY, NFRAMES_PERKEY, seq++, p));
     }
   }
-  const t = new Uint8Array(15);
-  t[0] = 0x06; t[3] = 0x5a; t[4] = 0xa5;
-  frames.push(buildFrame(CMD_PERKEY, NFRAMES_PERKEY, seq, t));
+  if (withTail) {
+    const t = new Uint8Array(15);
+    t[0] = 0x06; t[3] = 0x5a; t[4] = 0xa5;
+    frames.push(buildFrame(CMD_PERKEY, NFRAMES_PERKEY, seq, t));
+  } else {
+    // fw26 官方无尾片：重写每帧的"本块总帧数"为实际 27
+    for (const f of frames) { f[2] = frames.length; f[19] = checksum(f); }
+  }
   return frames;
 }
 
@@ -777,7 +826,15 @@ export function buildConfigWrite(baseFrames, { effect, colorMode, brightness, sp
       // blob[3]（帧字节 8）= 渲染模式：01=普通效果，02=动画模式（仅 fw24）。真机对照：官方驱动
       // 选花开富贵时 blob[3] 01→02 且表写入花色才正常；带 01 时固件走普通渲染 → 蓝色兜底
       if (!fw26) f[8] = animMode ? 0x02 : 0x01;
-      f[14] = 0x00;                                                        // apply 标志必须写 0
+      // blob[9] = Gaoshou(自定义)模式开关：官方 FillCfg 0x4914cd `cmp GaoshouIndex,选中行; setz →
+      // Cfg[9]`——选中自定义行时写 1，普通效果恒 0。早前"apply 标志必须写 0"只对效果域成立，
+      // 自定义模式必须写 1，否则固件不切入每键渲染（2026-10-18 K65 版 OemDrv REA，自定义模式
+      // 下发不生效的根因之一）。
+      f[14] = fw26 && effect === 21 ? 1 : 0;
+      // blob[11] = 自定义色组选择器 = 组号 + StartGp（KB.ini StartGp 缺省 32，K65 无该键 → 0x20 =
+      // 组 0）。官方 FillCfg 0x4914e3 `dl = StartGp + settings[当前组] → Cfg[11]`。与出厂模板
+      // slice0 payload[12]=0x20 互证。仅 fw26 自定义模式写，其余保持读回值。
+      if (fw26 && effect === 21) f[16] = 0x20;
       if (effect != null) f[15] = effect;
       // 色彩模式（blob[12]，1 自定义/3 默认）——两代都写（真机回归教训：fw26 停写会让设备
       // 卡在历史值（如旧写入的 1）且无法自愈，2026-10-18 回滚为始终写，恢复最初可用行为）。

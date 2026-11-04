@@ -1,7 +1,7 @@
 // 宏页：宏列表 + 浏览器键盘录制 + 时间轴编辑 + 预览回放 + 写入键盘（cmd 0x03）
 import { h, toast, promptBox, confirmBox } from '../ui.js';
 import { iconEl } from '../ui-icons.js';
-import { t, L } from '../i18n.js';
+import { t } from '../i18n.js';
 import { state, save } from '../store.js';
 import { vkName } from '../vk.js';
 import { CODE_VK } from '../codevk.js';
@@ -29,24 +29,27 @@ export function renderMacroPage(root, ctx) {
 
   // ---- 列表 ----
   const list = h('div', { class: 'macro-list' });
+  // 没有宏时「写入键盘」「录制」禁用（列表空态文案已说明，不再 toast 拦截）；
+  // dlBtn/recBtn 在下方定义，rebuildList 首次调用晚于定义，此处引用安全
+  const syncDlBtn = () => { dlBtn.disabled = !state.macros.length; recBtn.disabled = !state.macros.length || recording; };
   const rebuildList = () => {
     list.innerHTML = '';
     for (const m of state.macros) {
       const item = h('div', { class: 'macro-item' + (m.id === curId ? ' on' : '') },
         h('span', { text: m.name, ondblclick: async (e) => {
           e.stopPropagation();
-          const nm = await promptBox(t('tc_macro_msg8', '重命名'), m.name);
+          const nm = await promptBox(t('tc_macro_msg8'), m.name);
           if (nm) { m.name = nm; save(); rebuildList(); }
         } }),
         h('span', {},
-          h('span', { class: 'mi-x', title: L('重命名', 'Rename'), onclick: async (e) => {
+          h('span', { class: 'mi-x', title: t('app.common.rename'), onclick: async (e) => {
             e.stopPropagation();
-            const nm = await promptBox(t('tc_macro_msg8', '重命名'), m.name);
+            const nm = await promptBox(t('tc_macro_msg8'), m.name);
             if (nm) { m.name = nm; save(); rebuildList(); }
           } }, iconEl('pencil', 12)),
-          h('span', { class: 'mi-x', title: L('删除', 'Delete'), onclick: async (e) => {
+          h('span', { class: 'mi-x', title: t('app.common.del'), onclick: async (e) => {
             e.stopPropagation();
-            if (!(await confirmBox(L('删除宏', 'Delete macro'), L(`删除「${m.name}」？`, `Delete "${m.name}"?`)))) return;
+            if (!(await confirmBox(t('app.macro.deleteMacro'), t('app.macro.deleteConfirm', { name: m.name })))) return;
             state.macros = state.macros.filter((x) => x !== m);
             if (curId === m.id) curId = state.macros[0]?.id ?? null;
             save(); rebuildList(); rebuildEvents();
@@ -56,13 +59,14 @@ export function renderMacroPage(root, ctx) {
       item.addEventListener('click', () => { curId = m.id; rebuildList(); rebuildEvents(); });
       list.appendChild(item);
     }
-    if (!state.macros.length) list.appendChild(h('div', { class: 'dim', text: L('当前没有宏', 'No macros yet') }));
+    if (!state.macros.length) list.appendChild(h('div', { class: 'dim', text: t('app.macro.noMacros') }));
+    syncDlBtn();
   };
 
   const cur = () => state.macros.find((m) => m.id === curId);
 
-  const newBtn = h('button', { class: 'btn primary', text: t('tc_macro_msg2', '新建宏'), onclick: async () => {
-    const nm = await promptBox(t('tc_macro_msg3', '请输入名称'), L('宏 ', 'Macro ') + (state.macros.length + 1));
+  const newBtn = h('button', { class: 'btn primary', text: t('tc_macro_msg2'), onclick: async () => {
+    const nm = await promptBox(t('tc_macro_msg3'), t('app.macro.defaultName', { n: state.macros.length + 1 }));
     if (!nm) return;
     const m = { id: nextMacroId(), name: nm, events: [] };
     state.macros.push(m);
@@ -71,18 +75,16 @@ export function renderMacroPage(root, ctx) {
   } });
 
   // ---- 录制 ----
-  const recBtn = h('button', { class: 'btn' }, iconEl('circle', 13), t('tc_macro_msg4', '录制'));
-  const stopBtn = h('button', { class: 'btn', disabled: true }, iconEl('square', 13), t('tc_macro_msg5', '停止'));
+  const recBtn = h('button', { class: 'btn', disabled: !state.macros.length }, iconEl('circle', 13), t('tc_macro_msg4'));
+  const stopBtn = h('button', { class: 'btn', disabled: true }, iconEl('square', 13), t('tc_macro_msg5'));
 
   function startRec() {
-    const m = cur();
-    if (!m) { toast(L('请先新建/选择一个宏', 'Create or select a macro first'), true); return; }
     recording = true;
     recEvents = [];
     recT0 = performance.now();
     recBtn.classList.add('rec-on');
     recBtn.disabled = true; stopBtn.disabled = false;
-    toast(L('录制中… 在键盘上按键，点「停止」结束', 'Recording… press keys on the keyboard, click "Stop" to finish'));
+    // 不 toast 操作说明：录制键变红闪烁 + 「停止」亮起即状态，事件会实时落入时间轴
     window.addEventListener('keydown', onKey);
     window.addEventListener('keyup', onKeyUp);
   }
@@ -91,7 +93,7 @@ export function renderMacroPage(root, ctx) {
     window.removeEventListener('keydown', onKey);
     window.removeEventListener('keyup', onKeyUp);
     recBtn.classList.remove('rec-on');
-    recBtn.disabled = false; stopBtn.disabled = true;
+    recBtn.disabled = !state.macros.length; stopBtn.disabled = true; // 录制中宏被删空时保持禁用
     const m = cur();
     if (m && recEvents) {
       // 相邻重复 down 去抖
@@ -120,12 +122,14 @@ export function renderMacroPage(root, ctx) {
   const loopInp = h('input', { class: 'inp', type: 'number', min: 1, max: 255, value: 1, style: 'width:52px' });
   loopInp.addEventListener('change', () => { loop = Math.max(1, +loopInp.value || 1); });
 
-  const playBtn = h('button', { class: 'btn primary', onclick: () => playMacro() }, iconEl('play', 13), t('tc_macro_msg14', '预览'));
+  const playBtn = h('button', { class: 'btn primary', onclick: () => playMacro() }, iconEl('play', 13), t('tc_macro_msg14'));
 
   function rebuildEvents() {
     evBox.innerHTML = '';
     const m = cur();
-    if (!m) { evBox.appendChild(h('div', { class: 'dim', style: 'padding:10px', text: L('选择左侧宏', 'Select a macro on the left') })); return; }
+    // 空宏/未选宏时预览按钮禁用（时间轴空态文案已说明原因，不再 toast 拦截）
+    playBtn.disabled = !m || !m.events.length;
+    if (!m) { evBox.appendChild(h('div', { class: 'dim', style: 'padding:10px', text: t('app.macro.selectMacro') })); return; }
     const evs = [...m.events].sort((a, b) => a.at - b.at);
     let prevAt = 0;
     evs.forEach((e, i) => {
@@ -133,7 +137,7 @@ export function renderMacroPage(root, ctx) {
       if (gap > 15) {
         evBox.appendChild(h('div', { class: 'mev' },
           h('span', { class: 't', text: '+' + gap + 'ms' }),
-          h('span', { class: 'act-dly', text: L('延时', 'Delay') }),
+          h('span', { class: 'act-dly', text: t('app.common.delay') }),
           h('span'), h('span'),
         ));
       }
@@ -143,23 +147,23 @@ export function renderMacroPage(root, ctx) {
       const unmapped = e.mapped === false || (e.mapped == null && !e.code);
       evBox.appendChild(h('div', { class: 'mev' + (unmapped ? ' unmapped' : '') },
         h('span', { class: 't', text: (e.at / 1000).toFixed(3) + 's' }),
-        h('span', { class: e.kind === 'dn' ? 'act-dn' : 'act-up', text: e.kind === 'dn' ? L('↓ 按下', '↓ Down') : L('↑ 释放', '↑ Up') }),
-        h('span', { text: e.label || vkName(e.code) || '—', title: unmapped ? L('此键无 HID 映射，写入键盘时会被忽略', 'No HID mapping — ignored when written to the keyboard') : '' }),
-        h('span', { class: 'mev-x', title: L('删除', 'Delete'), onclick: () => {
+        h('span', { class: e.kind === 'dn' ? 'act-dn' : 'act-up', text: e.kind === 'dn' ? t('app.macro.down') : t('app.macro.up') }),
+        h('span', { text: e.label || vkName(e.code) || '—', title: unmapped ? t('app.macro.unmappedTip') : '' }),
+        h('span', { class: 'mev-x', title: t('app.common.del'), onclick: () => {
           m.events.splice(m.events.indexOf(e), 1); save(); rebuildEvents();
         } }, iconEl('x', 11)),
       ));
     });
-    if (!evs.length) evBox.appendChild(h('div', { class: 'dim', style: 'padding:10px', text: L('空宏 — 点「录制」并敲击键盘', 'Empty macro — click "Record" and tap keys') }));
+    if (!evs.length) evBox.appendChild(h('div', { class: 'dim', style: 'padding:10px', text: t('app.macro.emptyMacro') }));
   }
 
   // ---- 回放（屏幕键盘可视化）----
   let playTimers = [];
   function playMacro() {
     const m = cur();
-    if (!m || !m.events.length) { toast(L('宏为空', 'Macro is empty'), true); return; }
+    if (!m || !m.events.length) return; // 空宏时按钮已禁用，此行为兜底
     stopPlay();
-    toast(L(`回放「${m.name}」×${loop}`, `Playing "${m.name}" ×${loop}`));
+    // 不 toast：键盘预览上的按键动画即回放反馈
     for (let p = 0; p < loop; p++) {
       const off = p * (m.events[m.events.length - 1].at + 300);
       for (const e of m.events) {
@@ -182,38 +186,39 @@ export function renderMacroPage(root, ctx) {
   const clearBtn = h('button', { class: 'btn danger', onclick: async () => {
     const m = cur();
     if (!m || !m.events.length) return;
-    if (!(await confirmBox(L('清空', 'Clear'), L(`清空「${m.name}」的所有事件？`, `Clear all events of "${m.name}"?`)))) return;
+    if (!(await confirmBox(t('app.common.clear'), t('app.macro.clearConfirm', { name: m.name })))) return;
     m.events = [];
     save(); rebuildEvents();
-  } }, iconEl('eraser', 13), L('清空事件', 'Clear events'));
+  } }, iconEl('eraser', 13), t('app.macro.clearEvents'));
 
   // ---- 写入键盘（逆向自原驱动：无线 CDev3632 cmd 0x03 / 有线 CDevG5KB cmd 05 + 键位指派读改写）----
-  const dlBtn = h('button', { class: 'btn primary', onclick: async () => {
-    if (!state.macros.length) { toast(L('还没有宏可写入', 'No macros to write yet'), true); return; }
+  const dlBtn = h('button', { class: 'btn primary' }, iconEl('send', 13), t('app.keys.writeKeyboard'));
+  dlBtn.addEventListener('click', async () => {
     dlBtn.disabled = true;
     try {
       const r = await device.applyMacros();
-      if (r?.sent) toast(L(`✓ 已写入 ${state.macros.length} 条宏${r.assigned ? `，指派 ${r.assigned} 键` : ''}——回放由键盘固件执行`,
-        `✓ Wrote ${state.macros.length} macro(s)${r.assigned ? `, assigned to ${r.assigned} key(s)` : ''} — playback runs on the keyboard firmware`));
-      else if (r?.error === 'too-big') toast(L(`打包 ${r.size}B 超上限（10240B）——删减宏/事件后重试`,
-        `Packed ${r.size}B exceeds the 10240B limit — trim macros/events and retry`), true);
-      else if (r?.error === 'no-channel') toast(L('当前接口不支持宏写入（需 2.4G 接收器或有线 feature 帧接口），请重新连接',
-        'This interface does not support macro writes (needs the 2.4G dongle or a wired feature-frame interface) — reconnect'), true);
-      else if (!r?.sim) toast(L('宏写入未成功，详见调试台日志', 'Macro write failed — see the debug panel log'), true);
-    } finally { dlBtn.disabled = false; }
-  } }, iconEl('send', 13), L('写入键盘', 'Write to keyboard'));
+      // 写入结果在键盘上不可见（回放由固件执行），保留成功/失败 toast
+      if (r?.sent) toast(t('app.macro.writeOk', {
+        n: state.macros.length,
+        extra: r.assigned ? t('app.macro.writeOkAssigned', { n: r.assigned }) : '',
+      }));
+      else if (r?.error === 'too-big') toast(t('app.macro.tooBig', { size: r.size }), true);
+      else if (r?.error === 'no-channel') toast(t('app.macro.writeNoChannel'), true);
+      else if (!r?.sim) toast(t('app.macro.writeFailed'), true);
+    } finally { dlBtn.disabled = false; syncDlBtn(); }
+  });
 
   root.append(h('div', { class: 'page-inner' },
     h('div', { class: 'macro-wrap' },
+      // 左列不加标题：「新建宏」按钮 + 列表即身份；标题占行且与右列不对称
       h('div', { class: 'macro-side' },
-        h('h3', { text: L('宏编辑', 'Macro editor') }),
         newBtn,
         list,
       ),
       h('div', { class: 'macro-editor' },
         h('div', { class: 'macro-tools' },
           recBtn, stopBtn, playBtn,
-          h('span', { class: 'dim', text: L('循环', 'Loop') }), loopInp,
+          h('span', { class: 'dim', text: t('app.common.loop') }), loopInp,
           clearBtn, dlBtn,
         ),
         evBox,

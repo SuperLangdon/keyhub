@@ -1,5 +1,6 @@
 // Windows VK 码表与键值功能编解码（与原驱动 keycode 32 位编码一致）
 import { state } from './store.js';
+import { t } from './i18n.js';
 import { CMD_HW } from './device/protocol.js';
 
 export const VK_NAME = new Map([
@@ -21,36 +22,19 @@ for (let i = 0; i < 12; i++) VK_NAME.set(0x70 + i, 'F' + (i + 1));
 for (let i = 0; i < 10; i++) VK_NAME.set(0x60 + i, 'Num' + i);
 VK_NAME.set(0x6A, 'Num*').set(0x6B, 'Num+').set(0x6D, 'Num-').set(0x6E, 'Num.').set(0x6F, 'Num/');
 
-// 多媒体 usage (consumer page)
-const CONSUMER = new Map([
-  [0xB5, '下一曲'], [0xB6, '上一曲'], [0xCD, '播放/暂停'], [0xE2, '静音'],
-  [0xE9, '音量+'], [0xEA, '音量-'],
-  [0x223, 'AC Back'], [0x18A, '本机浏览'],
-  [0x227, '收藏'], [0x225, '主页'], [0x23C, '我的电脑'], [0x192, '计算器'], [0x183, '媒体播放器'],
-  [0x18C, '邮件'], [0xB7, '停止'],
-]);
-const CONSUMER_EN = new Map([
-  [0xB5, 'Next'], [0xB6, 'Prev'], [0xCD, 'Play/Pause'], [0xE2, 'Mute'],
-  [0xE9, 'Vol +'], [0xEA, 'Vol -'],
-  [0x223, 'AC Back'], [0x18A, 'Local browser'],
-  [0x227, 'Favorites'], [0x225, 'Home'], [0x23C, 'My computer'], [0x192, 'Calculator'], [0x183, 'Media player'],
-  [0x18C, 'Email'], [0xB7, 'Stop'],
+// 多媒体 usage (consumer page)：usage → 语言包键（app.fn.media.*，词条随语言取）
+const CONSUMER_KEY = new Map([
+  [0xB5, 'app.fn.mediaNext'], [0xB6, 'app.fn.mediaPrev'], [0xCD, 'app.fn.mediaPlayPause'], [0xE2, 'app.fn.mediaMute'],
+  [0xE9, 'app.fn.mediaVolUp'], [0xEA, 'app.fn.mediaVolDn'],
+  [0x223, 'app.fn.mediaAcBack'], [0x18A, 'app.fn.mediaBrowser'],
+  [0x227, 'app.fn.mediaFavor'], [0x225, 'app.fn.mediaHome'], [0x23C, 'app.fn.mediaComputer'], [0x192, 'app.fn.mediaCalc'], [0x183, 'app.fn.mediaPlayer'],
+  [0x18C, 'app.fn.mediaMail'], [0xB7, 'app.common.stop'],
 ]);
 
-const MOUSE_ACTIONS = new Map([
-  [0x01, '鼠标左键'], [0x02, '鼠标右键'], [0x04, '鼠标中键'],
-  [0x05, '滚轮上'], [0x06, '滚轮下'], [0x07, '前进'], [0x08, '后退'], [0x09, '双击'],
-]);
-const MOUSE_EN = new Map([
-  [0x01, 'Mouse L'], [0x02, 'Mouse R'], [0x04, 'Mouse M'],
-  [0x05, 'Scroll up'], [0x06, 'Scroll down'], [0x07, 'Forward'], [0x08, 'Back'], [0x09, 'D-click'],
-]);
-
-// 灯光控制（0x09,0x01,0x08xxxxxx 类指令）
-export const LEDCTL = new Map([
-  ['power/toggle', '灯光开/关'], ['speed/up', '灯效加速'], ['speed/down', '灯效减速'],
-  ['light/up', '亮度+'], ['light/down', '亮度-'],
-  ['direction/up', '方向切换'], ['direction/toggle', '方向切换'],
+// 鼠标动作码 → 语言包键（app.fn.mouse.*）
+const MOUSE_KEY = new Map([
+  [0x01, 'app.fn.mouseL'], [0x02, 'app.fn.mouseR'], [0x04, 'app.fn.mouseM'],
+  [0x05, 'app.fn.mouseUp'], [0x06, 'app.fn.mouseDn'], [0x07, 'app.fn.mouseFwd'], [0x08, 'app.fn.mouseBack'], [0x09, 'app.fn.mouseDbl'],
 ]);
 
 export function vkName(vk) {
@@ -58,45 +42,40 @@ export function vkName(vk) {
   return VK_NAME.get(vk) ?? ('VK ' + vk.toString(16).toUpperCase());
 }
 
-// func = {type, code, param}  →  显示文本
-export function funcLabel(func, t) {
+// func = {type, code, param}  →  显示文本（文案一律走语言包 t()，随语言切换）
+export function funcLabel(func) {
   if (!func) return '';
-  const en = langIsEn();
   const { type, code, param } = func;
   if (type === 0x0A) {
     const m = state.macros?.find((x) => x.id === param);
-    return (en ? 'Macro ' : '宏 ') + (m ? m.name : '#' + param);
+    return t('app.fn.macro', { name: m ? m.name : '#' + param });
   }
   if (type === 0x01) {
     const c = COMMON_CMDS.find((x) => x.code === code);
-    return c ? (t ? t(c.tag, 'CMD ' + code.toString(16)) : c.tag) : (en ? 'Cmd #' : '命令 #') + (code ?? 0).toString(16);
+    return c ? t(c.tag) : t('app.fn.cmd', { code: (code ?? 0).toString(16) });
   }
   if (type === 0x02) {
     if (code === 0x01 && param === 0x05000000) return 'B'; // Alice 分离 B 键
-    if (code >= 0x01 && code <= 0x09 && code !== 0x08 && param) return (en ? MOUSE_EN : MOUSE_ACTIONS).get(code) || ('Mouse ' + code);
+    if (code >= 0x01 && code <= 0x09 && code !== 0x08 && param) return t(MOUSE_KEY.get(code)) || ('Mouse ' + code);
     return vkName(code);
   }
   if (type === 0x09 && param) {
     const top = (param >>> 24) & 0xFF;
-    if (top === 0x07) return (en ? 'FX #' : '灯效 #') + (param & 0xFF);
+    if (top === 0x07) return t('app.fn.fx', { n: param & 0xFF });
     if (top === 0x08) {
-      const which = en
-        ? { 0: 'Light', 2: 'Speed', 3: 'Brightness', 4: 'Direction' }[(param >>> 16) & 0xFF] || 'Light'
-        : { 0: '灯光', 2: '速度', 3: '亮度', 4: '方向' }[(param >>> 16) & 0xFF] || '灯光';
-      const dir = { 1: '+', 2: '-', 0: en ? ' on/off' : '开关' }[(param >>> 8) & 0xFF] ?? '';
+      // which 字节：0=灯光 2=速度 3=亮度 4=方向（与 makeLedCtlFunc 的编码一致）
+      const which = t({ 0: 'app.fn.ledLight', 2: 'app.light.speed', 3: 'app.light.brightness', 4: 'app.fn.ledDir' }[(param >>> 16) & 0xFF] ?? 'app.fn.ledLight');
+      const dir = { 1: '+', 2: '-', 0: t('app.fn.dirToggle') }[(param >>> 8) & 0xFF] ?? '';
       return which + dir;
     }
     if (top === 0x02) {
       const usage = param & 0xFFFF;
-      return (en ? CONSUMER_EN : CONSUMER).get(usage) || ('Media ' + usage.toString(16));
+      return t(CONSUMER_KEY.get(usage)) || ('Media ' + usage.toString(16));
     }
     return 'Cmd ' + param.toString(16);
   }
   return vkName(code);
 }
-
-let langIsEn = () => false;
-export function setFuncLang(isEn) { langIsEn = () => !!isEn; }
 
 // 供"按键页"面板使用的功能分类数据
 export function keyboardKeyList() {

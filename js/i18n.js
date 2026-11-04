@@ -1,4 +1,7 @@
-// 语言包加载与缓存 + 应用自带的双语标签
+// 语言包加载与缓存 + 词条查找
+// assets/i18n/{code}.json 每语言一份：tc_* 平级键 = 原驱动语言包词条（zh/en/kr 齐全，
+// 键名与驱动资源一致，勿改）；app.* 分组 = 本应用界面文案（zh/en；kr 未译，查找时回退 en）。
+// 文案中的 {x} 为插值占位符，调用方以 t(key, { x: 值 }) 填充。
 const cache = {};
 
 export async function loadLang(code) {
@@ -19,23 +22,35 @@ export function setLang(code) {
 
 export function lang() { return currentCode; }
 
-// t(key, fallback)：取原驱动语言包词条
-export function t(key, fallback) {
-  if (!current) return fallback ?? key;
-  const v = current[key];
-  return (v === undefined || v === '') ? (fallback ?? key) : v;
+// 点路径查找：'app.nav.lighting' → pack.app.nav.lighting；不含点的键（tc_*）平级直取
+function lookup(pack, key) {
+  if (!pack) return undefined;
+  if (Object.prototype.hasOwnProperty.call(pack, key)) {
+    return typeof pack[key] === 'string' ? pack[key] : undefined;
+  }
+  let o = pack;
+  for (const seg of key.split('.')) {
+    o = o?.[seg];
+    if (o === undefined) return undefined;
+  }
+  return typeof o === 'string' ? o : undefined;
 }
 
-// L(zh, en)：应用界面自用双语（原语言包的通用词条存在错位，不用作界面骨架）
-export function L(zh, en) {
-  return currentCode === 'zh' ? zh : en;
+// t(key, params)：当前语言 → en 兜底（kr 缺 app 段）→ 键名本身（漏键直接可见，便于排查）。
+// 空串视为缺失（驱动包部分键在个别语言留空）。
+export function t(key, params) {
+  let v = lookup(current, key);
+  if (v === undefined || v === '') v = lookup(cache.en, key);
+  if (v === undefined || v === '') return key;
+  if (params) for (const [k, val] of Object.entries(params)) v = v.split('{' + k + '}').join(String(val));
+  return v;
 }
 
 // ---- 灯效名（三种语言的 tc_kb_led1..19 都从第 1 个效果开始编号，led20=关闭） ----
 export function fxName(ui) {
-  return t('tc_kb_led' + ui, '效果 ' + ui);
+  return t('tc_kb_led' + ui);
 }
 export function fxOffName() {
-  return t('tc_kb_led20', L('关闭灯光', 'Light OFF'));
+  return t('tc_kb_led20');
 }
 export const FX_CUSTOM_UI = 19; // 自定义模式槽位

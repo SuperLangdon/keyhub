@@ -117,7 +117,7 @@ test('parseConfig 解码与 buildConfigWrite 语义一致', () => {
 });
 
 // ---------- 每键 RGB ----------
-test('buildPerKey：R/G/B 三平面 × 9 片 + 尾片', () => {
+test('buildPerKey：R/G/B 三平面 × 9 片 + 尾片（fw24 历史行为）', () => {
   const frames = P.buildPerKey({ 0: [1, 2, 3], 125: [4, 5, 6] }, 126);
   assert.equal(frames.length, 3 * 9 + 1);
   assert.equal(frames[0][5], 1, 'R[0] → 帧0 payload[1]');   // 帧0 p[0]=0e p[1..]=R[0..13]
@@ -127,6 +127,20 @@ test('buildPerKey：R/G/B 三平面 × 9 片 + 尾片', () => {
   assert.equal(t[4], 0x06);
   assert.equal(t[7], 0x5a);
   assert.equal(t[8], 0xa5);
+});
+
+test('buildPerKey withTail=false：fw26 官方 SetGame = 27 片纯数据、无尾片', () => {
+  // 官方 CDev3632::SetGame = Send13(cmd 02, tag=组号) 378B 按 14B 分片 = 27 片，
+  // 无 [06 5a a5] 尾片（2026-10-18 K65 版 OemDrv sub_489A00 实证）
+  const frames = P.buildPerKey({ 0: [1, 2, 3], 125: [4, 5, 6] }, 126, false);
+  assert.equal(frames.length, 27);
+  assert.equal(frames[0][5], 1, 'R[0]');
+  assert.equal(frames[18 + 8][4 + 14], 6, 'B[125]');
+  for (const f of frames) {
+    assert.equal(f[2], 27, '本块总帧数 = 27');
+    assert.equal(f[19], P.checksum(f), '校验和自洽');
+    assert.equal(f[4] & 0xf0, 0x00, 'tag = 组 0');
+  }
 });
 
 // ---------- 调色板 ----------
@@ -233,7 +247,7 @@ test('effectTableLoc 分段', () => {
   assert.deepEqual(P.effectTableLoc(13), [5, 17]);
   assert.deepEqual(P.effectTableLoc(14), [6, 5]);
   assert.deepEqual(P.effectTableLoc(18), [6, 13]);
-  assert.deepEqual(P.effectTableLoc(21), [4, 7]); // 越界兜底
+  assert.deepEqual(P.effectTableLoc(21), [6, 15]); // 自定义行（0 基行 18）参数对 blob[94]/[95]，驱动 FillCfg 19 行循环实证
 });
 
 // ---------- film 屏幕烧录（feat520 通道；布局反汇编实证自 K65 版 OemDrv.exe） ----------
@@ -439,6 +453,25 @@ test('buildConfigWrite fw26：效果字节 = UI 号、colorMode 恢复始终写�
   assert.equal(wr[seq][off], 2, '参数槽仍按 UI 号索引');
 });
 
+test('buildConfigWrite fw26 自定义模式（SW21）：blob[9]=1 开关 + blob[11]=0x20 色组 + 参数对 blob[94/95]', () => {
+  // 官方 FillCfg 0x491430 汇编：cfg[9] = setz(GaoshouIndex==选中行)；cfg[11] = StartGp(32)+组号；
+  // 19 行参数循环把自定义行（0 基行 18）的亮度/速度写 blob[94]/[95]。
+  const wr = P.buildConfigWrite(null, { gen: 'fw26', effect: 21, colorMode: 0x01, brightness: 2, speed: 3, colorful: false, lightHw: [1, 5, 10, 15, 20] });
+  assert.equal(wr[0][14], 1, 'blob[9] = Gaoshou 自定义开关（早前恒 0 = 不生效根因）');
+  assert.equal(wr[0][15], 21, 'blob[10] = 效果字节 21');
+  assert.equal(wr[0][16], 0x20, 'blob[11] = 组 0 + StartGp 32');
+  assert.equal(wr[6][15], 10, '自定义档亮度 = LightHW[2]（blob[94]，非旧错位的 blob[63]）');
+  assert.equal(wr[6][16], (3 << 4) | 0, '自定义档速度字节（blob[95]）');
+  assert.equal(wr[4][7], 0x04, '出厂模板常量：ui1 亮度槽（blob[58]）不被自定义档误写');
+  for (const f of wr) assert.equal(f[19], P.checksum(f), '校验和自洽');
+  // 非自定义效果 / fw24 保持旧行为：blob[9]=0、blob[11] 不写
+  const e5 = P.buildConfigWrite(null, { gen: 'fw26', effect: 5, colorMode: 1 });
+  assert.equal(e5[0][14], 0);
+  const w24 = P.buildConfigWrite(null, { gen: 'fw24', effect: 21, colorMode: 1 });
+  assert.equal(w24[0][14], 0, 'fw24 自定义沿用历史行为（开关字节不动）');
+  assert.equal(w24[0][16], 0x20, 'fw24 blob[11] 保持出厂模板 0x20（模板即自带 组0+StartGp，与官方语义互证）');
+});
+
 test('buildConfigWrite 速度字节低 nibble：炫彩=7 / 非炫彩=0（两代一致，最初真机可用行为）', () => {
   const [seq, off] = P.effectTableLoc(9);
   const base = P.blobToFrames(new Uint8Array(0x190));
@@ -467,12 +500,30 @@ test('padMatrixDwords：CRC 型号补槽至 MatrixLen + 末槽 A5A5A5A5', () => 
   assert.deepEqual(d2, [1, 2, 3], '非 CRC 不打标记');
 });
 
-test('GetPower 电量帧（K65 版 CDevG5MS::GetPower @0x4946E0）：校验和布局 cmd 09/01 len 1', () => {
-  const f = P.buildFeat520FrameK65(P.BATTERY_CMD_K65, P.BATTERY_SUB_K65, 0, 1, null, 1);
-  assert.equal(f.length, P.FEAT520_LEN);
-  assert.equal(f[0], 9, 'report id 9');
-  assert.deepEqual([...f.slice(2, 8)], [0x09, 0x01, 0x01, 0x00, 0x01, 0x00], 'cmd/sub/块数/seq/len16LE');
-  let ck = 0;
-  for (let i = 2; i < P.FEAT520_LEN; i++) ck = (ck + f[i]) & 0xff;
-  assert.equal(f[1], ck, '校验和 = 字节 2..519 累加（GetPower 内联计算同款）');
+// ---------- 电量寄存器（K65/fw26 屏幕控制器，feature report 10；2026-10-27 真机定位） ----------
+test('decodeBatteryK65：真机样本解码（4.00V ≈ 四格/80%，充电位随 USB 插拔翻转）', () => {
+  // 真机原始读数：拔 USB = 06 A0 00 A5 9B 89 28 00；插 USB = 06 A0 02 A5 9B 89 28 00
+  const dis = P.decodeBatteryK65(Uint8Array.from([0x06, 0xa0, 0x00, 0xa5, 0x9b, 0x89, 0x28, 0x00]));
+  assert.equal(dis.voltage, 4.0, '0xA0 × 25mV = 4.00V');
+  assert.equal(dis.charging, false, '拔线：状态位 00');
+  assert.ok(dis.percent >= 85 && dis.percent <= 95, `4.00V → 90% 附近（标准锂电曲线；屏幕四格仅弱印证，待放电校准。实得 ${dis.percent}）`);
+  const chg = P.decodeBatteryK65(Uint8Array.from([0x06, 0xa0, 0x02, 0xa5, 0x9b, 0x89, 0x28, 0x00]));
+  assert.equal(chg.charging, true, '插线：bit1=充电中');
+  // 满电 / 低电边界
+  assert.equal(P.decodeBatteryK65(Uint8Array.from([0x06, 0xa8, 0x02, 0xa5, 0x9b, 0x89, 0x28, 0x00])).percent, 100, '4.20V=100%');
+  const low = P.decodeBatteryK65(Uint8Array.from([0x06, 0x80, 0x00, 0xa5, 0x9b, 0x89, 0x28, 0x00]));
+  assert.equal(low.percent, 0, '3.20V=0%');
+  // 魔数不符 / 长度不足 / 物理域越界 → null
+  assert.equal(P.decodeBatteryK65(Uint8Array.from([0x06, 0xa0, 0x00, 0x5a, 0x9b, 0x89, 0x28, 0x00])), null, '魔数[3]≠A5');
+  assert.equal(P.decodeBatteryK65(Uint8Array.from([0x07, 0xa0, 0x00, 0xa5, 0x9b, 0x89, 0x28, 0x00])), null, '魔数[0]≠06');
+  assert.equal(P.decodeBatteryK65(Uint8Array.from([0x06, 0xa0, 0x00, 0xa5, 0x9b])), null, '长度不足（<6）');
+  assert.equal(P.decodeBatteryK65(Uint8Array.from([0x06, 0xff, 0x00, 0xa5, 0x9b, 0x89, 0x28, 0x00])), null, '电压越界（6.375V）');
+  // report 5 入口（FF00/0001 集合）：仅前 6 字节（probe6 真机样本 06 A0 00 A5 9B 89）
+  const alt = P.decodeBatteryK65(Uint8Array.from([0x06, 0xa0, 0x00, 0xa5, 0x9b, 0x89]));
+  assert.ok(alt && alt.voltage === 4.0 && alt.charging === false, '6 字节截短寄存器可解（电压/充电位均在）');
+  // WebHID 剥离首字节布局（Chrome 把 0x06 当 report ID 丢弃，整体左移一位）
+  const stripped7 = P.decodeBatteryK65(Uint8Array.from([0xa0, 0x02, 0xa5, 0x9b, 0x89, 0x28, 0x00]));
+  assert.ok(stripped7 && stripped7.voltage === 4.0 && stripped7.charging === true, 'report 10 剥离布局（7B）可解');
+  const stripped5 = P.decodeBatteryK65(Uint8Array.from([0xa0, 0x00, 0xa5, 0x9b, 0x89]));
+  assert.ok(stripped5 && stripped5.voltage === 4.0 && stripped5.charging === false, 'report 5 剥离布局（5B）可解');
 });

@@ -7,16 +7,16 @@ import * as P from './protocol.js';
 import { on } from '../store.js';
 import { h, download } from '../ui.js';
 import { iconEl } from '../ui-icons.js';
-import { L } from '../i18n.js';
+import { t } from '../i18n.js';
 
 // 六个级别（与 devLog 的 kind 一一对应）：点击级别徽标切换显隐
 const KINDS = [
-  { k: 'tx', label: () => L('发送', 'TX') },
-  { k: 'rx', label: () => L('接收', 'RX') },
-  { k: 'in', label: () => L('信息', 'Info') },
-  { k: 'ok', label: () => L('成功', 'OK') },
-  { k: 'warn', label: () => L('警告', 'Warn') },
-  { k: 'er', label: () => L('错误', 'Error') },
+  { k: 'tx', label: () => t('app.dbg.kindTx') },
+  { k: 'rx', label: () => t('app.dbg.kindRx') },
+  { k: 'in', label: () => t('app.dbg.kindIn') },
+  { k: 'ok', label: () => t('app.dbg.kindOk') },
+  { k: 'warn', label: () => t('app.dbg.kindWarn') },
+  { k: 'er', label: () => t('app.dbg.kindEr') },
 ];
 const LOG_DOM_CAP = 800; // 与 logBuf 容量一致，DOM 不超缓冲
 const kindOn = new Set(KINDS.map((x) => x.k));
@@ -64,7 +64,7 @@ export function initPanel() {
   btnFloat.addEventListener('click', () => {
     const onF = drawer.classList.toggle('float');
     btnFloat.replaceChildren(iconEl(onF ? 'panelBottom' : 'pip', 14)); // 悬浮=画中画，停靠=底部栏
-    btnFloat.title = onF ? L('停靠回底部抽屉', 'Dock to bottom drawer') : L('悬浮为可拖动小窗', 'Float as draggable window');
+    btnFloat.title = onF ? t('app.dbg.dock') : t('app.dbg.float');
     if (onF) {
       const p = loadPos();
       // .float 类已先加上，offsetWidth/Height 已是小窗尺寸
@@ -108,7 +108,7 @@ export function initPanel() {
     if (!m) return '';
     const d = P.decodeFrame(m[1].split(' ').map((x) => parseInt(x, 16)));
     if (!d) return '';
-    return `${d.name ?? 'cmd 0x' + d.cmd.toString(16)} · 帧 ${d.seq + 1}/${d.nFrames} · tag ${d.tag} · 片长 ${d.len}B · ${d.sumOk ? '校验和正确' : '校验和不符'}`;
+    return `${d.name ?? 'cmd 0x' + d.cmd.toString(16)} · ${t('app.dbg.tipFrame', { i: d.seq + 1, n: d.nFrames, tag: d.tag, len: d.len })} · ${d.sumOk ? t('app.dbg.tipSumOk') : t('app.dbg.tipSumBad')}`;
   }
   function lineEl(e) {
     const span = h('span', { class: e.kind, text: fmt(e) + '\n' });
@@ -117,7 +117,7 @@ export function initPanel() {
     return span;
   }
   function updateCount() {
-    countEl.textContent = L(`${logEl.childNodes.length}/${getLogs().length} 行`, `${logEl.childNodes.length}/${getLogs().length} lines`);
+    countEl.textContent = t('app.dbg.lineCount', { shown: logEl.childNodes.length, total: getLogs().length });
   }
   function rerender() {
     logEl.textContent = '';
@@ -138,7 +138,7 @@ export function initPanel() {
 
   // 级别徽标 + 搜索框 + 跟随
   for (const { k, label } of KINDS) {
-    const chip = h('button', { class: `dbg-kind ${k} on`, type: 'button', title: L('点击切换该级别显隐', 'Toggle this level') },
+    const chip = h('button', { class: `dbg-kind ${k} on`, type: 'button', title: t('app.dbg.toggleLevel') },
       h('i', { class: 'dot' }), h('span', { text: label() }));
     chip.addEventListener('click', () => {
       chip.classList.toggle('on');
@@ -163,12 +163,8 @@ export function initPanel() {
     }
   });
 
-  // 静态 HTML 里的控件文案（跟随/读回应答/发送/只读探针）在初始化时按当前语言写入
-  followEl.parentNode.lastChild.textContent = L('跟随', 'Follow');
-  readbackEl.parentNode.lastChild.textContent = L('读回应答', 'Read back');
-  document.getElementById('dbg-send').textContent = L('发送', 'Send');
-  searchEl.placeholder = L('筛选…', 'Filter…');
-  document.querySelector('.dbg-quick-label').textContent = L('只读探针', 'Read-only probes');
+  // 静态 HTML 里的控件文案（跟随/读回应答/发送/筛选/只读探针等）统一由
+  // main.js applyStaticI18n 按 data-i18n-* 属性写入，切语言即时刷新，此处不再手工设置
 
   // ---------- 连接状态徽标 + 发送目标接口 ----------
   const chipEl = (cls, text) => h('span', { class: 'dbg-chip ' + cls, text });
@@ -176,7 +172,7 @@ export function initPanel() {
     const devs = device.hidDevs ?? [];
     targetSel.replaceChildren();
     if (!devs.length) {
-      targetSel.appendChild(h('option', { text: L('（未连接真机）', '(no device)'), selected: '' }));
+      targetSel.appendChild(h('option', { text: t('app.dbg.noDevice'), selected: '' }));
       targetSel.disabled = true;
       return;
     }
@@ -192,14 +188,14 @@ export function initPanel() {
   function refreshStatus() {
     statusEl.replaceChildren();
     if (device.mode !== 'hid') {
-      statusEl.appendChild(chipEl('sim', L('演示模式 · 未连接真机', 'Demo · no device')));
+      statusEl.appendChild(chipEl('sim', t('app.dbg.demoNoDev')));
     } else {
       const ch = device.channelOf(device.dev);
       statusEl.appendChild(chipEl(ch === 'wireless' ? 'wifi' : 'wired',
-        ch === 'wireless' ? L('2.4G 无线', '2.4G wireless') : L('有线', 'Wired')));
+        ch === 'wireless' ? t('app.common.wireless') : t('app.common.wired')));
       const id = `${(device.dev.vendorId || 0).toString(16).padStart(4, '0')}:${(device.dev.productId || 0).toString(16).padStart(4, '0')}`;
       statusEl.appendChild(chipEl('id', id.toUpperCase()));
-      statusEl.appendChild(chipEl('sim', L(`${device.hidDevs.length} 个接口`, `${device.hidDevs.length} interface(s)`)));
+      statusEl.appendChild(chipEl('sim', t('app.dbg.ifaceCount', { n: device.hidDevs.length })));
     }
     statusEl.title = device.dev?.productName || '';
     refreshTargets();
@@ -211,18 +207,18 @@ export function initPanel() {
   const MODES = [
     {
       v: '13',
-      name: () => L('0x13 协议帧', '0x13 protocol frame'),
-      ph: () => L('13 44 01 00 …（≤20 字节，自动补零并重算校验和）', '13 44 01 00 … (≤20 bytes, zero-padded, checksum recomputed)'),
+      name: () => t('app.dbg.mode13'),
+      ph: () => t('app.dbg.mode13Ph'),
     },
     {
       v: 'feat',
-      name: () => L('特征报告', 'Feature report'),
-      ph: () => L('06 82 01 00 01 00 06 00 …（首字节=report ID，其余=数据）', '06 82 01 00 01 00 06 00 … (first byte = report ID)'),
+      name: () => t('app.dbg.modeFeat'),
+      ph: () => t('app.dbg.modeFeatPh'),
     },
     {
       v: 'raw',
-      name: () => L('原始输出报告', 'Raw output report'),
-      ph: () => L('13 44 01 …（原样发送，首字节=report ID）', '13 44 01 … (sent as-is, first byte = report ID)'),
+      name: () => t('app.dbg.modeRaw'),
+      ph: () => t('app.dbg.modeRawPh'),
     },
   ];
   for (const m of MODES) modeSel.appendChild(h('option', { value: m.v, text: m.name() }));
@@ -239,7 +235,7 @@ export function initPanel() {
     const bytes = [];
     for (const x of raw.trim().split(/[\s,]+/).filter(Boolean)) {
       const v = parseInt(x, 16);
-      if (!Number.isFinite(v) || v < 0 || v > 255) throw new Error(L(`「${x}」不是合法的十六进制字节`, `"${x}" is not a valid hex byte`));
+      if (!Number.isFinite(v) || v < 0 || v > 255) throw new Error(t('app.dbg.badHex', { x }));
       bytes.push(v);
     }
     return bytes;
@@ -253,30 +249,30 @@ export function initPanel() {
     try { bytes = parseBytes(raw); } catch (e) { return { error: e.message }; }
     const hx = (b) => b.toString(16).padStart(2, '0');
     if (modeSel.value === '13') {
-      if (bytes.length > 20) return { error: L('超过 20 字节（0x13 帧 = 1 报文 ID + 19 数据）', 'Over 20 bytes (0x13 frame = 1 report ID + 19 data)') };
-      if (bytes[0] !== P.REPORT_ID) return { error: L('首字节须为 13；发任意报文请切到「原始输出报告」', 'First byte must be 13; use "Raw output report" for arbitrary frames') };
+      if (bytes.length > 20) return { error: t('app.dbg.over20') };
+      if (bytes[0] !== P.REPORT_ID) return { error: t('app.dbg.firstByte13') };
       const f = new Uint8Array(20);
       f.set(bytes);
       const given = bytes.length === 20 ? f[19] : null;
       f[19] = P.checksum(f);
       const d = P.decodeFrame(f);
-      const parts = [d.name ?? 'cmd 0x' + hx(d.cmd), L(`帧 ${d.seq + 1}/${d.nFrames}`, `frame ${d.seq + 1}/${d.nFrames}`)];
+      const parts = [d.name ?? 'cmd 0x' + hx(d.cmd), t('app.dbg.framePart', { cur: d.seq + 1, total: d.nFrames })];
       if (d.tag || d.len) parts.push(`tag ${d.tag} · ${d.len}B`);
-      if (given != null && given !== f[19]) parts.push(L(`校验和重算 ${hx(given)}→${hx(f[19])}`, `checksum ${hx(given)}→${hx(f[19])}`));
+      if (given != null && given !== f[19]) parts.push(t('app.dbg.checksumFix', { from: hx(given), to: hx(f[19]) }));
       return { bytes: f, note: parts.join(' · ') };
     }
     if (modeSel.value === 'feat') {
-      if (bytes.length < 2) return { error: L('至少需要 report ID + 1 字节数据', 'Need at least a report ID + 1 data byte') };
-      if (bytes.length - 1 > 520) return { error: L('数据超过 520 字节（520B feature 帧上限）', 'Data over 520 bytes (520B feature frame limit)') };
+      if (bytes.length < 2) return { error: t('app.dbg.need2') };
+      if (bytes.length - 1 > 520) return { error: t('app.dbg.over520') };
       return {
         bytes,
-        note: L(`SetFeature(F${hx(bytes[0])}, ${bytes.length - 1}B 数据)`, `SetFeature(F${hx(bytes[0])}, ${bytes.length - 1}B data)`)
-          + (readbackEl.checked ? L(' → GetFeature 回读', ' → GetFeature read-back') : ''),
+        note: t('app.dbg.setFeatureNote', { id: hx(bytes[0]), n: bytes.length - 1 })
+          + (readbackEl.checked ? t('app.dbg.getFeatureReadback') : ''),
       };
     }
-    if (bytes.length < 2) return { error: L('至少需要 report ID + 1 字节数据', 'Need at least a report ID + 1 data byte') };
-    if (bytes.length > 64) return { error: L('超过 64 字节（输出报文上限）', 'Over 64 bytes (output report limit)') };
-    return { bytes, note: L(`sendReport(F${hx(bytes[0])}, ${bytes.length - 1}B) 原样发送`, `sendReport(F${hx(bytes[0])}, ${bytes.length - 1}B) as-is`) };
+    if (bytes.length < 2) return { error: t('app.dbg.need2') };
+    if (bytes.length > 64) return { error: t('app.dbg.over64') };
+    return { bytes, note: t('app.dbg.rawNote', { id: hx(bytes[0]), n: bytes.length - 1 }) };
   }
 
   function updatePreview() {
@@ -287,7 +283,7 @@ export function initPanel() {
       previewEl.classList.add('err');
       return;
     }
-    if (!p.bytes) { previewEl.textContent = L('等待输入…（发送前会显示报文解析与校验）', 'Waiting for input… (frame analysis shown before sending)'); return; }
+    if (!p.bytes) { previewEl.textContent = t('app.dbg.waiting'); return; }
     previewEl.textContent = `${P.hex(p.bytes)}  ${p.note}`;
     previewEl.title = frameTip(P.hex(p.bytes)) || '';
   }
@@ -312,11 +308,11 @@ export function initPanel() {
 
   // ---------- 只读探针 ----------
   const PROBES = [
-    { label: () => L('识别 GetPSD', 'Identify GetPSD'), tip: () => L('型号识别：对全部已授权接口逐条路径探测（只读）', 'Model identification across all granted interfaces (read-only)'), run: () => device.probePsd() },
-    { label: () => L('电量查询', 'Battery'), tip: () => L('电量查询（K65 = GetPower feat520 通道；LEOBOG = 0x4A 仅 2.4G 应答；只读）', 'Battery query (K65: GetPower over feat520; LEOBOG: 0x4A, 2.4G only; read-only)'), run: () => device.probeBattery() },
-    { label: () => L('读配置 0x44', 'Config 0x44'), tip: () => L('读灯光配置十片并按协议字段解码（2.4G 通道，只读）', 'Read & decode the 10-frame light config (2.4G, read-only)'), run: () => device.probeConfig() },
-    { label: () => L('键位层 0x41', 'Keymap 0x41'), tip: () => L('读层 0 键位表 dword（2.4G 通道，只读）', 'Read layer-0 keymap dwords (2.4G, read-only)'), run: () => device.probeKeymap(0) },
-    { label: () => L('有线命令扫描', 'Wired cmd sweep'), tip: () => L('有线 520B feature 帧：只读遍历 cmd 83-8A × sub 0-2 并解码配置（只读）', 'Wired 520B frames: read-only sweep of cmds 83-8A (read-only)'), run: () => device.probeWiredStores() },
+    { label: () => t('app.dbg.probePsd'), tip: () => t('app.dbg.probePsdTip'), run: () => device.probePsd() },
+    { label: () => t('app.dbg.probeBattery'), tip: () => t('app.dbg.probeBatteryTip'), run: () => device.probeBattery() },
+    { label: () => t('app.dbg.probeConfig'), tip: () => t('app.dbg.probeConfigTip'), run: () => device.probeConfig() },
+    { label: () => t('app.dbg.probeKeymap'), tip: () => t('app.dbg.probeKeymapTip'), run: () => device.probeKeymap(0) },
+    { label: () => t('app.dbg.probeSweep'), tip: () => t('app.dbg.probeSweepTip'), run: () => device.probeWiredStores() },
   ];
   const probesEl = document.getElementById('dbg-probes');
   for (const pr of PROBES) {
@@ -347,9 +343,9 @@ export function initPanel() {
     const text = lines.map(fmt).join('\n');
     try {
       await navigator.clipboard.writeText(text);
-      devLog('ok', L(`已复制 ${lines.length} 行（当前筛选）`, `Copied ${lines.length} lines (current filter)`));
+      devLog('ok', t('app.dbg.copiedFiltered', { n: lines.length }));
     } catch (e) {
-      devLog('er', L('复制失败：', 'Copy failed: ') + e.message);
+      devLog('er', t('app.common.copyFailed', { msg: e.message }));
     }
   });
   document.getElementById('dbg-dl').addEventListener('click', () => {

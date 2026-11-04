@@ -1,7 +1,7 @@
 // KeyHub — 启动与导航
 // 构建标记（store.js 定义，main 再导出）：改动 js 后递增，用于日志/诊断包中核对
 // 浏览器是否拿到最新代码（避免模块缓存误导调试）
-import { loadLang, setLang, L } from './i18n.js';
+import { loadLang, setLang, t } from './i18n.js';
 import { state, restore, save, loadCfgFor, on, BUILD } from './store.js';
 export { BUILD };
 import { KeyboardView } from './keyboard/render.js';
@@ -11,7 +11,6 @@ import { initConnectHero, openDemoPicker, addDemoRecord, autoConnect } from './c
 import { initPanel } from './device/panel.js';
 import { h, toast } from './ui.js';
 import { iconEl } from './ui-icons.js';
-import { setFuncLang } from './vk.js';
 // 各功能页由 PAGES 的 mod() 动态 import 按需加载（switchPage 调用），
 // 不要在此静态引入——会让懒加载失效、启动全量拉取。
 
@@ -24,7 +23,7 @@ async function enterApp(meta) {
     model = await r.json();
   } catch (e) {
     console.error(e);
-    toast(L(`型号数据加载失败（${meta.slug}）：${e.message}`, `Failed to load model data (${meta.slug}): ${e.message}`), true);
+    toast(t('app.common.modelLoadFail', { slug: meta.slug, msg: e.message }), true);
     return; // 留在欢迎页，不进入残缺会话
   }
   model.slug = meta.slug;
@@ -58,12 +57,12 @@ const ctx = {
 };
 
 const PAGES = [
-  { id: 'light', icon: 'lightbulb', name: () => L('灯光', 'Lighting'), mod: () => import('./pages/light.js') },
-  { id: 'keys', icon: 'keyboard', name: () => L('按键', 'Keys'), mod: () => import('./pages/keys.js') },
-  { id: 'screen', icon: 'pip', name: () => L('屏幕', 'Screen'), mod: () => import('./pages/screen.js'),
+  { id: 'light', icon: 'lightbulb', name: () => t('app.nav.lighting'), mod: () => import('./pages/light.js') },
+  { id: 'keys', icon: 'keyboard', name: () => t('app.nav.keys'), mod: () => import('./pages/keys.js') },
+  { id: 'screen', icon: 'pip', name: () => t('app.nav.screen'), mod: () => import('./pages/screen.js'),
     cond: () => !!state.model?.screen }, // 仅带屏型号（K65：model.screen 由 KB.ini ShowScreen/siScreen 生成）
-  { id: 'macro', icon: 'codeXml', name: () => L('宏', 'Macros'), mod: () => import('./pages/macro.js') },
-  { id: 'settings', icon: 'settings', name: () => L('设置', 'Settings'), mod: () => import('./pages/settings.js') },
+  { id: 'macro', icon: 'codeXml', name: () => t('app.nav.macros'), mod: () => import('./pages/macro.js') },
+  { id: 'settings', icon: 'settings', name: () => t('app.nav.settings'), mod: () => import('./pages/settings.js') },
 ];
 let curPageMod = null;
 
@@ -87,6 +86,7 @@ async function switchPage(id) {
   buildNav();
   const host = document.getElementById('page');
   host.innerHTML = '';
+  document.getElementById('page-top')?.replaceChildren(); // 页面级横幅（灯光总开关等）随切页清空
   const p = PAGES.find((x) => x.id === id);
   try {
     const mod = await p.mod();
@@ -96,8 +96,8 @@ async function switchPage(id) {
     // 模块加载失败 / 页面渲染异常：给出可见反馈，不让导航停在空白页
     console.error(e);
     host.replaceChildren(h('p', { class: 'dim', style: 'padding:20px' },
-      L(`页面加载失败（${id}）：${e.message}`, `Failed to load page (${id}): ${e.message}`)));
-    toast(L('页面加载失败，详见控制台', 'Page failed to load — see console'), true);
+      t('app.common.pageLoadFailDetail', { id, msg: e.message })));
+    toast(t('app.common.pageLoadFail'), true);
   }
 }
 
@@ -141,14 +141,14 @@ function startRenderLoop() {
 async function switchLang(lang) {
   if (state.lang === lang) return;
   state.lang = lang;
-  applyGateTexts(lang); // 门页文案 + 全部 .lang-item 选中态
-  await applyLang();
+  await applyLang(); // 先就位语言包再刷新界面（data-i18n 静态文案随 applyLang 写入）
+  syncLangMenuSel(); // 三页语言菜单选中态
   save();
   applyTheme(); // 同步主题按钮提示文案
   updateModeTag(); // 会话模式标签随语言重渲染
   heroCtl?.refresh(); // 主页 hero 文案随语言重渲染
   if (state.slug) { buildNav(); switchPage(state.page); }
-  toast(L('语言已切换', 'Language switched'));
+  // 不 toast「语言已切换」：整个界面即刻换语，本身就是反馈
 }
 
 // ---------- 顶栏 / 调试台 ----------
@@ -157,7 +157,7 @@ async function switchLang(lang) {
 function updateModeTag() {
   const el = document.getElementById('tb-mode');
   if (!el) return;
-  el.textContent = L('演示', 'Demo');
+  el.textContent = t('app.common.demo');
   el.classList.toggle('hidden', device.mode === 'hid');
 }
 
@@ -190,49 +190,30 @@ async function applyLang() {
   await loadLang(state.lang);
   await loadLang(state.lang === 'zh' ? 'en' : 'zh'); // 预载另一语言，切换即时
   setLang(state.lang);
-  setFuncLang(state.lang !== 'zh');
+  applyStaticI18n(); // HTML 静态文案（data-i18n-*）与 <title> 同步当前语言
+}
+
+// HTML 静态文案本地化：元素带 data-i18n-text/-html/-title/-aria/-placeholder 属性，
+// 值为语言包键名；applyLang 时统一扫描写入（与 JS 渲染的页面文案同语言，切语言即刷新）。
+function applyStaticI18n() {
+  document.title = t('app.appTitle');
+  document.documentElement.lang = state.lang === 'en' ? 'en' : 'zh-CN';
+  for (const el of document.querySelectorAll('[data-i18n-text]')) el.textContent = t(el.dataset.i18nText);
+  for (const el of document.querySelectorAll('[data-i18n-html]')) el.innerHTML = t(el.dataset.i18nHtml);
+  for (const el of document.querySelectorAll('[data-i18n-title]')) el.title = t(el.dataset.i18nTitle);
+  for (const el of document.querySelectorAll('[data-i18n-aria]')) el.setAttribute('aria-label', t(el.dataset.i18nAria));
+  for (const el of document.querySelectorAll('[data-i18n-placeholder]')) el.placeholder = t(el.dataset.i18nPlaceholder);
 }
 
 // ---------- 免责声明门：确认后才能进入型号选择 ----------
+// 声明文案存于语言包 app.gate.*（HTML 节点带 data-i18n-* 属性，applyStaticI18n 统一写入）。
 // 声明文案有实质变更时把版本号 +1，已确认过的用户会重新看到门禁
 // （v2：项目从 LEOBOG 单品牌扩展为多厂商型号注册表，措辞随之改为按注册表表述）
 const GATE_VER = 2;
-const GATE_TEXT = {
-  zh: {
-    badge: '非官方 · 开源驱动实现',
-    desc: '本站是多款 SinoWealth 方案键盘官方驱动的<b>开源网页复刻</b>，与各键盘品牌官方无关。设备通信协议来自同芯片键盘'
-      + '（AULA F75 / F87 Pro，SINO WEALTH 方案）的<a href="https://github.com/marcoslor/Aula-F87-Controller" target="_blank" rel="noreferrer">开源逆向项目</a>'
-      + '；型号数据、语言包与灯效帧解析自各品牌官方驱动安装包（LEOBOG、YINDIAO 等，来源详见型号注册表）。',
-    warn: '部分写入路径<b>未经原厂键盘实测</b>，向真机写入配置可能出现预期之外的行为（灯光异常、配置错乱等）。使用本工具对设备造成的任何影响，<b>后果由使用者自行承担</b>。',
-    agree: '我已了解这是非官方开源实现，自愿承担全部使用风险',
-    enter: '确认并进入',
-  },
-  en: {
-    badge: 'Unofficial · Open-source driver',
-    desc: 'This site is an <b>open-source web replica</b> of the official desktop drivers for SinoWealth-platform keyboards, not affiliated with any keyboard vendor. The device protocol comes from '
-      + '<a href="https://github.com/marcoslor/Aula-F87-Controller" target="_blank" rel="noreferrer">open-source reverse engineering</a>'
-      + ' of keyboards sharing the same chip (AULA F75 / F87 Pro); model data, language packs and light frames are parsed from each vendor\'s official driver package (LEOBOG, YINDIAO, etc. — see the model registry for sources).',
-    warn: 'Some write paths are <b>untested against real keyboards</b>; writing configs to a real device may behave unexpectedly (lighting glitches, corrupted settings, etc.). <b>Use at your own risk.</b>',
-    agree: 'I understand this is an unofficial open-source implementation and I accept all risks of using it',
-    enter: 'Agree & Enter',
-  },
-};
 
-function applyGateTexts(lang) {
-  const txt = GATE_TEXT[lang === 'en' ? 'en' : 'zh'];
-  document.getElementById('gate-badge').textContent = txt.badge;
-  document.getElementById('gate-desc').innerHTML = txt.desc;
-  document.getElementById('gate-warn-text').innerHTML = txt.warn;
-  document.getElementById('gate-agree-text').textContent = txt.agree;
-  document.getElementById('gate-enter').textContent = txt.enter;
-  document.querySelectorAll('.lang-item').forEach((b) => b.classList.toggle('on', b.dataset.lang === lang)); // 三页语言菜单选中态
-  const demoTitle = lang === 'en'
-    ? 'Demo mode: pick a model — a demo card is added on the home page'
-    : '演示模式：选个型号，主页添加演示设备并进入体验';
-  for (const id of ['gate-demo', 'welcome-demo']) {
-    const b = document.getElementById(id);
-    if (b) b.title = demoTitle; // 本函数在 setLang 前调用，不能走 L()
-  }
+// 三页语言菜单（门禁页 / 主页 / 应用顶栏）的选中态指示
+function syncLangMenuSel() {
+  document.querySelectorAll('.lang-item').forEach((b) => b.classList.toggle('on', b.dataset.lang === state.lang));
 }
 
 // ---------- 日/夜间主题 ----------
@@ -240,7 +221,7 @@ function applyTheme() {
   const dark = state.theme === 'dark';
   document.documentElement.dataset.theme = dark ? 'dark' : 'light';
   const icon = dark ? 'sun' : 'moon'; // 图标指向切换后的目标
-  const title = L('切换日/夜间模式', 'Toggle day/night mode');
+  const title = t('app.topbar.toggleTheme');
   for (const id of ['gate-theme', 'welcome-theme', 'btn-theme']) {
     const btn = document.getElementById(id);
     if (btn) { btn.replaceChildren(iconEl(icon, 18)); btn.title = title; }
@@ -301,8 +282,7 @@ function wireGate() {
     if (!meta) return;
     addDemoRecord(meta);
     if (device.mode === 'hid') device.disconnect(); // 演示会话 = 纯模拟器，不向真机下发
-    toast(L(`已添加「${meta.short}」演示设备`, `Demo device "${meta.short}" added`));
-    enterApp(meta);
+    enterApp(meta); // 直接进入该型号——界面切换即反馈，不再 toast
   };
   for (const id of ['gate-demo', 'welcome-demo']) {
     document.getElementById(id).replaceChildren(iconEl('play', 18));
@@ -313,7 +293,7 @@ function wireGate() {
   wireThemeToggle(document.getElementById('gate-theme'));
   wireThemeToggle(document.getElementById('welcome-theme'));
   applyTheme();
-  applyGateTexts(state.lang);
+  syncLangMenuSel();
 }
 
 // ---------- 启动 ----------

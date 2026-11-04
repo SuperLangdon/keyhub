@@ -27,6 +27,7 @@ export class KeyboardView {
 
     this._resize = this._resize.bind(this);
     this._ro = new ResizeObserver(this._resize);
+    this._ro.observe(container); // 观察 #kb-view（白卡内容盒）：切页变宽窄、窗口缩放都会触发重适配
   }
 
   async setModel(model) {
@@ -61,17 +62,17 @@ export class KeyboardView {
       this.layer.appendChild(d);
       this.keyEls.set(k.i, d);
     }
-    const stage = this.el.closest('.kb-stage');
-    if (stage && this._ro) { this._ro.disconnect(); this._ro.observe(stage); }
     this._resize();
     this.clear();
   }
 
   _resize() {
-    const stage = this.el.closest('.kb-stage');
-    if (!stage || !this.model) return;
-    const pad = 28;
-    const aw = stage.clientWidth - pad, ah = stage.clientHeight - pad;
+    // 量 #kb-view（白卡内容盒）而不是舞台：白卡铺满舞台、屏幕页白卡还会让位给画布卡，
+    // 只有内容盒能同时反映这两种宽度；量舞台会让渲染溢出白卡或留出大边
+    const box = this.el.parentElement;
+    if (!box || !this.model) return;
+    const pad = 8;
+    const aw = box.clientWidth - pad, ah = box.clientHeight - pad;
     const { w, h } = this.model.img;
     const s = Math.max(0.05, Math.min(aw / w, ah / h, 1.6)); // 上限 1.6：keyimg 位图再放大就明显模糊
     const cw = Math.max(120, Math.floor(w * s)), ch = Math.floor(h * s);

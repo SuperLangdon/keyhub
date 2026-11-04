@@ -7,6 +7,7 @@ KeyHub is also an **open registry of community-maintained keyboard profiles** (`
 - Have the official driver? Convert it into a profile in ~10 minutes: see [CONTRIBUTING.md](CONTRIBUTING.md)（中文）.
 - Keyboard only? Connect it, click *Add device*, and use the "Help adapt this keyboard" flow to file an adapter request with a one-click diagnostics bundle.
 - Registry data schema & rules: [docs/registry-schema.md](docs/registry-schema.md).
+- UI language packs (`assets/i18n/`, zh/en/kr): structure & how to edit strings: [docs/i18n.md](docs/i18n.md).
 
 Features: model auto-identification (PSD fingerprint), per-key RGB painting, lighting effects, key remapping layers, macros, battery & sleep settings, plus an HID console with read-only probes for tinkerers.
 

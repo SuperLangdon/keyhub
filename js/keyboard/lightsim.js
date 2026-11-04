@@ -48,6 +48,8 @@ export class LightSim {
     const out = this._out && this._out.length === n * 3 ? this._out : (this._out = new Float32Array(n * 3));
     out.fill(0);
     if (!this.cfg) return out;
+    // 灯光总开关关闭：全灭（按键闪亮反馈一并熄灭——真机关灯时按键不会亮）
+    if (this.cfg.lightOn === false) return out;
 
     const ui = this.cfg.effectUi;
     const bright = [0, 0.25, 0.5, 0.75, 1][this.cfg.brightness ?? 4] ?? 1;
@@ -66,7 +68,7 @@ export class LightSim {
     }
 
     switch (ui) {
-      case 1: fixedFn(this.geo, out, color, perKey, bright); break;
+      case 1: fixedFn(this.geo, out, color, bright); break;
       case 2: respire(this.geo, out, t, color, bright); break;
       case 3: rainbow(this.geo, out, t, bright); break;
       case 4: flashAway(this.geo, out, t, color, bright); break;
@@ -102,10 +104,9 @@ export class LightSim {
 }
 
 // ---------- 效果实现 ----------
-function fixedFn(g, out, color, perKey, bright) {
-  const anyPaint = Object.keys(perKey).length > 0;
+function fixedFn(g, out, color, bright) {
   for (let i = 0; i < g.n; i++) {
-    const c = anyPaint ? (perKey[g.index[i]] || [0, 0, 0]) : (color || hsv(g.col[i] / 16, 1, 1));
+    const c = color || hsv(g.col[i] / 16, 1, 1);
     set(out, i, c, bright);
   }
 }
